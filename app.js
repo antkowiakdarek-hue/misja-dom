@@ -366,6 +366,33 @@ function cloudSection() {
         () => { Push.disable().finally(() => Cloud.leave()); }, 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
 }
 
+const APP_VERSION = '2026-11-26-b';
+
+/* Wymusza pobranie najnowszych plików i nowego service workera (przydatne na iPhonie). */
+async function refreshApp() {
+  openDialog('Odświeżanie…', h('p', { class: 'sub' }, 'Chwileczkę…'));
+  try {
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.update().catch(() => {})));
+    }
+    if ('caches' in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+  } catch (e) { /* i tak przeładuj */ }
+  location.reload();
+}
+function infoSection() {
+  const sw = h('span', {}, 'sprawdzanie…');
+  if ('caches' in window) {
+    caches.keys().then((k) => { sw.textContent = k.length ? k.join(', ') : 'brak'; }).catch(() => { sw.textContent = 'brak danych'; });
+  } else sw.textContent = 'brak';
+  return [h('h2', {}, 'Informacje'),
+    h('p', { class: 'sub' }, 'Wersja aplikacji: ', APP_VERSION, h('br'), 'Pamięć podręczna (service worker): ', sw),
+    'serviceWorker' in navigator && h('button', { class: 'btn ghost', onclick: refreshApp }, 'Odśwież aplikację')];
+}
+
 function pushSection() {
   if (!Cloud.configured || !Cloud.connected || !Push.available) return null;
   const st = Push.state();
@@ -542,7 +569,8 @@ function renderHome() {
     parent && h('button', { class: 'btn danger', onclick: () => confirmDelete(
       'Wszystkie dane (domownicy, zadania, historia) zostaną skasowane z tego urządzenia.', () => {
         state = { members: [], tasks: [], log: [] }; save(); tab = 'tasks'; render();
-      }) }, 'Usuń wszystkie dane'));
+      }) }, 'Usuń wszystkie dane'),
+    infoSection());
 }
 
 function renderNav() {

@@ -1,5 +1,5 @@
 // Service worker: network-first, z kopią offline.
-const CACHE = 'po-rowno-v4';
+const CACHE = 'po-rowno-v5';
 const FILES = ['./', 'index.html', 'styles.css', 'app.js', 'cloud.js', 'push.js', 'config.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
