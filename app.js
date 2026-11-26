@@ -240,9 +240,7 @@ function taskForm(task) {
     dayWrap, dateWrap, timeWrap,
     h('label', {}, 'Ile wysiłku to wymaga?'), weightBox,
     h('div', { class: 'actions' },
-      !isNew && h('button', { type: 'button', class: 'btn danger', onclick: () => confirmDelete(`Usunąć zadanie „${task.title}”?`, () => {
-        state.tasks = state.tasks.filter((x) => x.id !== task.id); save(); render();
-      }) }, 'Usuń'),
+      !isNew && h('button', { type: 'button', class: 'btn danger', onclick: () => askDeleteTask(task) }, 'Usuń'),
       h('span', { class: 'spacer' }),
       cancelBtn(), h('button', { type: 'submit', class: 'btn' }, 'Zapisz')));
   openDialog(isNew ? 'Nowe zadanie' : 'Edytuj zadanie', form);
@@ -366,7 +364,7 @@ function cloudSection() {
         () => { Push.disable().finally(() => Cloud.leave()); }, 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
 }
 
-const APP_VERSION = '2026-11-26-b';
+const APP_VERSION = '2026-11-26-c';
 
 /* Wymusza pobranie najnowszych plików i nowego service workera (przydatne na iPhonie). */
 async function refreshApp() {
@@ -456,6 +454,13 @@ function renderSetup() {
       h('button', { class: 'btn ghost small', onclick: joinDialog }, 'Mam kod zaproszenia')));
 }
 
+function askDeleteTask(task) {
+  const recurring = task.repeat !== 'none';
+  confirmDelete(
+    `Usunąć zadanie „${task.title}”?` + (recurring ? ' To zadanie się powtarza, więc zniknie też z kolejnych dni.' : '') + ' Historia wykonanych zadań zostanie.',
+    () => { state.tasks = state.tasks.filter((x) => x.id !== task.id); save(); render(); });
+}
+
 function taskCard({ t, done, status }) {
   const parent = isParent();
   const m = done ? member(done.memberId) : member(t.assignee);
@@ -469,6 +474,7 @@ function taskCard({ t, done, status }) {
       h('div', { class: 'title' }, t.title),
       h('div', { class: 'meta' }, dots(t.weight), h('span', {}, scheduleText(t)),
         done ? h('span', {}, '✓ ', m ? m.name : 'ktoś', ' · ', fmtTime(done.ts)) : (m && who(m)), badge)),
+    parent && h('button', { class: 'icon-btn', 'aria-label': `Usuń zadanie: ${t.title}`, title: 'Usuń zadanie', onclick: () => askDeleteTask(t) }, '✕'),
     done
       ? (canUndo && h('button', { class: 'btn ghost small', onclick: () => undo(done) }, 'Cofnij'))
       : h('button', { class: 'btn', onclick: () => onDone(t) }, 'Zrobione'));
