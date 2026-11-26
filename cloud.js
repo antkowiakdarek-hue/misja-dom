@@ -56,6 +56,7 @@ const Cloud = (() => {
     lastError: '',
     onUpdate() {},
     get connected() { return Boolean(meta.householdId); },
+    get householdId() { return meta.householdId || ''; },
     get role() { return meta.role || 'parent'; },
     get me() { return meta.memberId || ''; },
     get code() { return meta.code || ''; },              // kod dla rodziców
@@ -207,6 +208,14 @@ const Cloud = (() => {
     unsubscribe();
     await runSync();
     api.onUpdate(false);
+  };
+
+  /* Wywołanie funkcji bazy (np. zapis subskrypcji push). */
+  api.rpc = async (fn, args) => {
+    await ensureClient();
+    const { data, error } = await sb.rpc(fn, args);
+    if (error) throw error;
+    return data;
   };
 
   /* Przypisuje to urządzenie do profilu domownika (kim jestem). */

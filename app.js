@@ -362,7 +362,32 @@ function cloudSection() {
       (st === 'error' || st === 'offline') && h('button', { class: 'btn ghost', onclick: () => Cloud.retry() }, 'Spróbuj ponownie'),
       st === 'noaccess' && h('button', { class: 'btn ghost', onclick: joinDialog }, 'Dołącz kodem'),
       h('button', { class: 'btn danger', onclick: () => confirmDelete(
-        'To urządzenie przestanie się synchronizować. Dane zostaną tu jako kopia lokalna.', () => Cloud.leave(), 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
+        'To urządzenie przestanie się synchronizować i dostawać powiadomienia. Dane zostaną tu jako kopia lokalna.',
+        () => { Push.disable().finally(() => Cloud.leave()); }, 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
+}
+
+function pushSection() {
+  if (!Cloud.configured || !Cloud.connected || !Push.available) return null;
+  const st = Push.state();
+  const note = (text) => h('p', { class: 'sub' }, text);
+  const out = [h('h2', {}, 'Powiadomienia'), note('Telefon da znać o nowym zadaniu i gdy zadanie jest spóźnione.')];
+  if (!Cloud.me) out.push(note('Najpierw wybierz swój profil powyżej, żeby powiadomienia trafiały do Ciebie.'));
+  if (st === 'install') {
+    out.push(note('Na iPhonie powiadomienia działają tylko z aplikacji dodanej do ekranu początkowego (Safari → Udostępnij → Dodaj do ekranu początkowego, iOS 16.4 lub nowszy). Otwórz aplikację z ikony i włącz je tam.'));
+  } else if (st === 'unsupported') {
+    out.push(note('Ta przeglądarka nie obsługuje powiadomień push. Na Androidzie użyj Chrome.'));
+  } else if (st === 'denied') {
+    out.push(note('Powiadomienia są zablokowane. Odblokuj je w ustawieniach telefonu (iPhone: Ustawienia → Powiadomienia → Misja Dom; Android: ustawienia aplikacji → Powiadomienia).'));
+  } else if (st === 'off') {
+    out.push(h('div', { class: 'row wrap' },
+      h('button', { class: 'btn', onclick: () => withBusy('Włączanie powiadomień…', () => Push.enable()) }, 'Włącz powiadomienia')));
+  } else {
+    out.push(h('div', { class: 'meta' }, '✓ Powiadomienia włączone na tym urządzeniu'),
+      h('div', { class: 'row wrap' },
+        h('button', { class: 'btn ghost', onclick: () => Push.test().catch((e) => notice('Nie udało się', friendlyError(e))) }, 'Pokaż testowe'),
+        h('button', { class: 'btn danger', onclick: () => withBusy('Wyłączanie…', () => Push.disable()) }, 'Wyłącz')));
+  }
+  return out;
 }
 
 /* ---------- widoki ---------- */
@@ -499,6 +524,7 @@ function renderHome() {
     h('h1', {}, 'Dom'),
     h('p', { class: 'sub' }, parent ? 'Domownicy i ustawienia.' : 'Twoje urządzenie i ustawienia.'),
     cloudSection(),
+    pushSection(),
     parent && h('h2', {}, 'Domownicy'),
     parent && state.members.map((m) => h('div', { class: 'card' },
       h('button', { class: 'body', onclick: () => memberForm(m) }, h('div', { class: 'title' }, who(m)), h('div', { class: 'meta' }, ROLES[m.role])),
@@ -552,6 +578,7 @@ Cloud.onUpdate = (statusOnly) => {
 };
 render();
 Cloud.init();
+setTimeout(() => { Push.resave().catch(() => {}); }, 5000);   // odśwież zapis subskrypcji push po synchronizacji
 setInterval(() => { if (tab === 'tasks' && state.members.length && idle()) render(); }, 60000);   // przeliczanie „Zaraz” i „Spóźnione”
 document.addEventListener('visibilitychange', () => { if (idle() && tab === 'tasks') render(); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
