@@ -36,7 +36,16 @@ body {
 main {
   max-width: 560px;
   margin: 0 auto;
-  padding: 20px 16px calc(96px + env(safe-area-inset-bottom));
+  padding: calc(20px + env(safe-area-inset-top)) 16px calc(140px + env(safe-area-inset-bottom));
+}
+/* iPhone (aplikacja z ekranu głównego): treść nie może przewijać się pod paskiem stanu */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: env(safe-area-inset-top);
+  background: var(--bg);
+  z-index: 60;
 }
 h1 { font-size: 1.6rem; margin: 0 0 4px; }
 h2 { font-size: 1.1rem; margin: 24px 0 10px; }
