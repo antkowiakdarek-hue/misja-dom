@@ -118,8 +118,12 @@ function isAuthor(t) { return isPending(t) && Cloud.connected && Boolean(meId())
 /* Czy to, co teraz dodam dla tej osoby, będzie wymagało potwierdzenia? */
 function needsApproval(assigneeId) {
   if (!Cloud.connected || !meId()) return false;
-  if (!isParent()) return true;                                   // dziecko zawsze proponuje
+  if (!isParent()) return assigneeId !== meId();                  // dziecko: dla siebie bez potwierdzenia, dla innych proponuje
   return memberRole(assigneeId) === 'parent' && assigneeId !== meId();   // rodzic tylko wobec innego rodzica
+}
+/* Własne zadanie dziecka dla siebie (jak przypomnienie): dziecko może je zmieniać i usuwać. */
+function isOwnSelf(t) {
+  return !isParent() && Cloud.connected && Boolean(meId()) && !isPending(t) && t.assignee === meId() && t.proposedBy === meId();
 }
 /* Kto potwierdzi zadanie, które autor (ja) kieruje do tej osoby. */
 function approverText(assigneeId) {
@@ -352,13 +356,16 @@ function taskForm(task, preset) {
   const assignee = h('select', { id: 'f-assignee', onchange: () => updateHint() },
     h('option', { value: '' }, 'Dla wszystkich (wspólne)'),
     state.members.map((m) => h('option', { value: m.id, selected: m.id === t.assignee }, `${m.name} (${ROLES[m.role].toLowerCase()})`)));
+  // dziecko nie zmienia osoby w swoim zadaniu dla siebie (to byłaby nowa propozycja dla kogoś innego)
+  if (!isNew && !isParent() && !isPending(task)) assignee.disabled = true;
   /* Informacja, czy zadanie trafi do potwierdzenia, i odpowiednia etykieta przycisku. */
   function updateHint() {
     const a = assignee.value || null;
     const pend = !isNew && isPending(task) ? true : (needsApproval(a) && (isNew || a !== task.assignee));
     let text = '';
     if (!isNew && isPending(task)) text = 'To zadanie czeka na potwierdzenie.';
-    else if (pend) text = `To zadanie wymaga potwierdzenia: ${approverText(a)}. Do tego czasu będzie blade i bez przypomnień.`;    hint.textContent = text;
+    else if (pend) text = `To zadanie wymaga potwierdzenia: ${approverText(a)}. Do tego czasu będzie blade i bez przypomnień.`;
+    else if (!isParent() && Cloud.connected && a === meId()) text = 'To zadanie jest tylko dla Ciebie: bez potwierdzenia, przypomni Ci o sobie.';    hint.textContent = text;
     hint.hidden = !text;
     submitBtn.textContent = pend && (isNew || !isPending(task)) ? 'Wyślij do potwierdzenia' : 'Zapisz';
   }
@@ -400,7 +407,7 @@ function taskForm(task, preset) {
       // potwierdzanie: nowa propozycja albo zmiana osoby na innego rodzica
       if (isNew) {
         if (needsApproval(data.assignee)) { data.status = 'pending'; data.proposedBy = meId(); }
-        else { data.status = 'active'; data.proposedBy = ''; }
+        else { data.status = 'active'; data.proposedBy = (!isParent() && Cloud.connected && meId()) ? meId() : ''; }   // dziecko: zadanie dla siebie
       } else if (isPending(task)) {
         data.status = 'pending'; data.proposedBy = task.proposedBy;
       } else if (needsApproval(data.assignee) && data.assignee !== task.assignee) {
@@ -419,12 +426,12 @@ function taskForm(task, preset) {
     h('label', {}, 'Ile wysiłku to wymaga?'), weightBox,
     skipWrap,
     h('div', { class: 'actions' },
-      !isNew && (isParent()
+      !isNew && (isParent() || isOwnSelf(task)
         ? h('button', { type: 'button', class: 'btn danger', onclick: () => askDeleteTask(task, p.day) }, 'Usuń')
         : h('button', { type: 'button', class: 'btn danger', onclick: () => withdrawDialog(task) }, 'Wycofaj')),
       h('span', { class: 'spacer' }),
       cancelBtn(), submitBtn));
-  openDialog(isNew ? (isParent() ? 'Nowe zadanie' : 'Zaproponuj zadanie') : 'Edytuj zadanie', form);
+  openDialog(isNew ? 'Nowe zadanie' : 'Edytuj zadanie', form);
   title.focus();
 }
 
@@ -545,7 +552,7 @@ function cloudSection() {
         () => { Push.disable().finally(() => Cloud.leave()); }, 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
 }
 
-const APP_VERSION = '2026-11-27-g';
+const APP_VERSION = '2026-11-27-h';
 
 /* Wymusza pobranie najnowszych plików i nowego service workera (przydatne na iPhonie). */
 async function refreshApp() {
@@ -755,7 +762,7 @@ function taskCard({ t, done, status }) {
   const badge = status === 'late' || status === 'overdue' ? h('span', { class: 'badge bad' }, 'Spóźnione')
     : status === 'missed' ? h('span', { class: 'badge bad' }, 'Niezrobione')
     : status === 'soon' ? h('span', { class: 'badge soon' }, 'Zaraz') : null;
-  const editable = parent && !past && !t.deleted;
+  const editable = (parent || isOwnSelf(t)) && !past && !t.deleted;
   const viewDay = addDays(startOfDay(new Date()), dayOffset);
   return h('div', { class: `card st-${status}` + (done ? ' done' : '') },
     h('div', { class: 'time' + (timed ? '' : ' small') }, timed ? t.time : t.repeat === 'weekly' ? 'w tygodniu' : 'w ciągu dnia'),
@@ -809,7 +816,7 @@ function renderTasks() {
     todo.map(taskCard),
     done.length > 0 && h('h2', {}, 'Zrobione'),
     done.map(taskCard),
-    canAdd() && !past && h('button', { class: 'fab', onclick: () => taskForm(null, isToday ? null : { date: dayKey(viewDay) }), 'aria-label': parent ? 'Dodaj zadanie' : 'Zaproponuj zadanie' }, '+'));
+    canAdd() && !past && h('button', { class: 'fab', onclick: () => taskForm(null, isToday ? null : { date: dayKey(viewDay) }), 'aria-label': 'Dodaj zadanie' }, '+'));
 }
 
 function renderStats() {
@@ -892,7 +899,7 @@ function planRow({ t, done, status }, d) {
   const onTap = pending
     ? (canApprove(t) ? () => approveDialog(t) : isAuthor(t) || parent ? () => taskForm(t, d ? { day: d } : null) : null)
     : () => taskForm(t, d ? { day: d } : null);
-  const disabled = pending ? !onTap : (!parent || past);
+  const disabled = pending ? !onTap : ((!parent && !isOwnSelf(t)) || past);
   return h('button', { class: `prow st-${status}`, disabled, onclick: onTap || undefined, 'aria-label': pending ? `${t.title} (czeka na potwierdzenie)` : t.title },
     h('span', { class: 'ptime' }, isTimed(t) ? t.time : ''),
     h('span', { class: 'ptitle' }, t.title),
@@ -962,7 +969,7 @@ function monthView() {
     grid,
     h('h2', {}, `${DAY_SHORT[weekdayIdx(planDay)]} ${planDay.getDate()} ${MONTHS_GEN[planDay.getMonth()]}`),
     dayBlock(planDay, { showHeader: false }),
-    canAdd() && startOfDay(planDay) >= startOfDay(new Date()) && h('button', { class: 'btn ghost', onclick: () => taskForm(null, { date: dayKey(planDay) }) }, isParent() ? '+ Dodaj zadanie na ten dzień' : '+ Zaproponuj zadanie na ten dzień')];
+    canAdd() && startOfDay(planDay) >= startOfDay(new Date()) && h('button', { class: 'btn ghost', onclick: () => taskForm(null, { date: dayKey(planDay) }) }, '+ Dodaj zadanie na ten dzień')];
 }
 function renderPlan() {
   return h('section', {},

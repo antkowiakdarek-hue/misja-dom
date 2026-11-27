@@ -118,7 +118,8 @@ const Cloud = (() => {
       const snap = snapshot[name];
       const all = new Map(state[name].map((o, i) => [o.id, { o, i }]));
       // dziecko wysyła tylko własne propozycje zadań (czekające na potwierdzenie) oraz własne odhaczenia
-      const ownPending = (o) => o.status === 'pending' && o.proposedBy && o.proposedBy === api.me;
+      // własne propozycje oraz własne zadania dla siebie (działają jak przypomnienia, bez potwierdzenia)
+      const ownPending = (o) => Boolean(api.me) && o.proposedBy === api.me && (o.status === 'pending' || o.assignee === api.me);
       const snapObj = (id) => { try { return JSON.parse(snap[id]); } catch (e) { return null; } };
       const forMe = (p) => p && p.status === 'pending' && p.assignee && p.assignee === api.me;   // zadanie czekające na moje potwierdzenie
       let cur = all;
@@ -133,7 +134,12 @@ const Cloud = (() => {
       let del = Object.keys(snap).filter((id) => !all.has(id));
       if (isChild && name === 'tasks') {
         // wolno usuwać tylko własne propozycje i odrzucone zadania skierowane do mnie (po stanie z ostatniej synchronizacji)
-        del = del.filter((id) => { const p = snapObj(id); return p && p.status === 'pending' && (p.proposedBy === api.me || p.assignee === api.me); });
+        del = del.filter((id) => {
+          const p = snapObj(id);
+          if (!p) return false;
+          const selfTask = p.assignee === api.me && p.proposedBy === api.me;
+          return selfTask || (p.status === 'pending' && (p.proposedBy === api.me || p.assignee === api.me));
+        });
       }
       if (up.length) {
         let { error } = await sb.from(name).upsert(up);
