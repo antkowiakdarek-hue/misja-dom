@@ -34,6 +34,7 @@ const Cloud = (() => {
       fromRow: (r) => ({
         id: r.id, title: r.title, weight: r.weight, repeat: r.recurrence,
         time: r.task_time || '', days: r.days || [], date: r.due_date || '', assignee: r.assignee || null,
+        created: r.created_at ? Date.parse(r.created_at) : 0,   // do oznaczania zaległości w planie
       }),
     },
     log: {

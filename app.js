@@ -23,6 +23,9 @@ let state = load();
 let tab = 'tasks';
 let range = 'week';
 let filterMember = null;
+let planMode = 'week';                 // 'week' | 'month'
+let planAnchor = new Date();           // dzień wyznaczający oglądany tydzień/miesiąc
+let planDay = new Date();              // wybrany dzień w widoku miesiąca
 let draftPeople = [];
 let draftSample = true;
 
@@ -76,6 +79,11 @@ const weekdayIdx = (d) => (d.getDay() + 6) % 7;   // pon = 0
 const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 const startOfWeek = (d) => { const s = startOfDay(d); s.setDate(s.getDate() - weekdayIdx(s)); return s; };
 const startOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1);
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const MONTHS_SHORT = ['sty', 'lut', 'mar', 'kwi', 'maj', 'cze', 'lip', 'sie', 'wrz', 'paź', 'lis', 'gru'];
+const MONTHS_GEN = ['stycznia', 'lutego', 'marca', 'kwietnia', 'maja', 'czerwca', 'lipca', 'sierpnia', 'września', 'października', 'listopada', 'grudnia'];
+const MONTHS_FULL = ['styczeń', 'luty', 'marzec', 'kwiecień', 'maj', 'czerwiec', 'lipiec', 'sierpień', 'wrzesień', 'październik', 'listopad', 'grudzień'];
+const sameDay = (a, b) => dayKey(a) === dayKey(b);
 const toMin = (hhmm) => { const [a, b] = hhmm.split(':').map(Number); return a * 60 + b; };
 const member = (id) => state.members.find((m) => m.id === id);
 const fmtTime = (ts) => {
@@ -140,6 +148,55 @@ function todayItems(now) {
   return items.sort((a, b) => key(a) - key(b));
 }
 
+/* ---------- plan: zadania w wybranym dniu ---------- */
+/* Czy zadanie wypada w danym dniu? "Raz w tygodniu" i "bez daty" pokazujemy osobno (blok tygodnia). */
+function occursOn(t, d) {
+  if (t.repeat === 'daily') return true;
+  if (t.repeat === 'days') return t.days.includes(weekdayIdx(d));
+  if (t.repeat === 'none') return Boolean(t.date) && t.date === dayKey(d);
+  return false;
+}
+function doneOn(t, d) {
+  const a = startOfDay(d).getTime(), b = startOfDay(addDays(d, 1)).getTime();
+  return state.log.find((l) => l.taskId === t.id && l.ts >= a && l.ts < b) || null;
+}
+function doneInWeek(t, d) {
+  const a = startOfWeek(d).getTime(), b = addDays(startOfWeek(d), 7).getTime();
+  return state.log.find((l) => l.taskId === t.id && l.ts >= a && l.ts < b) || null;
+}
+function visibleToMe(t) {
+  if (isParent()) return !filterMember || t.assignee === filterMember;
+  return !t.assignee || t.assignee === meId();
+}
+function itemsOn(d) {
+  const now = new Date(), today = startOfDay(now), ds = startOfDay(d);
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const out = [];
+  for (const t of state.tasks) {
+    if (!visibleToMe(t) || !occursOn(t, ds)) continue;
+    const done = doneOn(t, ds);
+    let status = 'upcoming';
+    if (done) status = 'done';
+    else if (ds < today) {
+      // "zaległe" tylko gdy zadanie istniało już tego dnia
+      if (!t.created || t.created > addDays(ds, 1).getTime()) continue;
+      status = 'missed';
+    } else if (sameDay(ds, today) && isTimed(t) && toMin(t.time) < nowMin) status = 'overdue';
+    out.push({ t, done, status });
+  }
+  const key = (i) => (isTimed(i.t) ? toMin(i.t.time) : 24 * 60 + 1);
+  return out.sort((a, b) => key(a) - key(b));
+}
+/* Zadania na tydzień bez konkretnego dnia: "raz w tygodniu" i (dla bieżącego tygodnia) bez daty. */
+function weekFloating(weekStart) {
+  const today = startOfDay(new Date());
+  const isCurrent = sameDay(startOfWeek(today), weekStart);
+  return state.tasks
+    .filter((t) => visibleToMe(t) && (t.repeat === 'weekly' || (isCurrent && t.repeat === 'none' && !t.date)))
+    .map((t) => ({ t, done: t.repeat === 'weekly' ? doneInWeek(t, weekStart) : lastDone(t) }))
+    .map((i) => ({ ...i, status: i.done ? 'done' : 'upcoming' }));
+}
+
 /* ---------- okna ---------- */
 const dlg = document.getElementById('dlg');
 function openDialog(title, ...body) {
@@ -184,9 +241,10 @@ function askWho(task) {
     h('div', { class: 'actions' }, cancelBtn()));
 }
 
-function taskForm(task) {
+function taskForm(task, preset) {
   const isNew = !task;
-  const t = task || { title: '', weight: 2, repeat: 'daily', time: '', days: [], date: '', assignee: null };
+  const p = preset || {};
+  const t = task || { title: '', weight: 2, repeat: p.date ? 'none' : 'daily', time: '', days: [], date: p.date || '', assignee: p.assignee || null };
   let weight = t.weight, repeat = t.repeat;
   const days = new Set(t.days.length ? t.days : ALL_DAYS);
 
@@ -230,7 +288,7 @@ function taskForm(task) {
         date: repeat === 'none' ? date.value : '',
         assignee: assignee.value || null,
       };
-      if (isNew) state.tasks.push({ id: uid(), ...data }); else Object.assign(task, data);
+      if (isNew) state.tasks.push({ id: uid(), ...data, created: Date.now() }); else Object.assign(task, data);
       save(); closeDialog(); render();
     },
   },
@@ -364,7 +422,7 @@ function cloudSection() {
         () => { Push.disable().finally(() => Cloud.leave()); }, 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
 }
 
-const APP_VERSION = '2026-11-26-c';
+const APP_VERSION = '2026-11-27-a';
 
 /* Wymusza pobranie najnowszych plików i nowego service workera (przydatne na iPhonie). */
 async function refreshApp() {
@@ -579,8 +637,91 @@ function renderHome() {
     infoSection());
 }
 
+/* ---------- plan: tydzień i miesiąc ---------- */
+const MARK = { done: '✓', missed: '!', overdue: '!', upcoming: '' };
+function planRow({ t, done, status }) {
+  const parent = isParent();
+  const m = done ? member(done.memberId) : member(t.assignee);
+  return h('button', { class: `prow st-${status}`, disabled: !parent, onclick: () => taskForm(t), 'aria-label': t.title },
+    h('span', { class: 'ptime' }, isTimed(t) ? t.time : ''),
+    h('span', { class: 'ptitle' }, t.title),
+    m && h('i', { class: 'dot', style: `--c:${m.color}`, title: m.name }),
+    h('span', { class: 'pmark', 'aria-hidden': 'true' }, MARK[status]));
+}
+function dayBlock(d, { showHeader = true } = {}) {
+  const parent = isParent();
+  const today = new Date();
+  const items = itemsOn(d);
+  const done = items.filter((i) => i.status === 'done').length;
+  return h('div', { class: 'dayblock' },
+    showHeader && h('div', { class: 'dayhead' + (sameDay(d, today) ? ' today' : '') },
+      h('strong', {}, `${DAY_SHORT[weekdayIdx(d)]} ${d.getDate()} ${MONTHS_SHORT[d.getMonth()]}`),
+      h('span', { class: 'sub' }, items.length ? `${done}/${items.length}` : ''),
+      parent && h('button', { class: 'icon-btn add', 'aria-label': `Dodaj zadanie na ${dayKey(d)}`, onclick: () => taskForm(null, { date: dayKey(d) }) }, '+')),
+    items.length ? items.map(planRow) : h('div', { class: 'empty-day' }, 'Brak zadań'));
+}
+function planNav(title, onPrev, onNext) {
+  return h('div', { class: 'plan-nav' },
+    h('button', { class: 'btn ghost small', onclick: onPrev, 'aria-label': 'Wstecz' }, '‹'),
+    h('strong', {}, title),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn ghost small', onclick: () => { planAnchor = new Date(); planDay = new Date(); render(); } }, 'Dziś'),
+      h('button', { class: 'btn ghost small', onclick: onNext, 'aria-label': 'Dalej' }, '›')));
+}
+function weekView() {
+  const start = startOfWeek(planAnchor);
+  const end = addDays(start, 6);
+  const title = `${start.getDate()} ${MONTHS_SHORT[start.getMonth()]} – ${end.getDate()} ${MONTHS_SHORT[end.getMonth()]} ${end.getFullYear()}`;
+  const floating = weekFloating(start);
+  return [
+    planNav(title, () => { planAnchor = addDays(start, -7); render(); }, () => { planAnchor = addDays(start, 7); render(); }),
+    ...Array.from({ length: 7 }, (_, i) => dayBlock(addDays(start, i))),
+    floating.length > 0 && h('div', { class: 'dayblock' },
+      h('div', { class: 'dayhead' }, h('strong', {}, 'W ciągu tygodnia'), h('span', { class: 'sub' }, 'bez konkretnego dnia')),
+      floating.map(planRow))];
+}
+function monthView() {
+  const first = startOfMonth(planAnchor);
+  const gridStart = startOfWeek(first);
+  const title = `${MONTHS_FULL[first.getMonth()]} ${first.getFullYear()}`;
+  const today = new Date();
+  const cells = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
+  // nie pokazuj całego pustego ostatniego wiersza
+  const rows = cells[35].getMonth() === first.getMonth() ? 6 : 5;
+  const grid = h('div', { class: 'mgrid' },
+    DAY_SHORT.map((n) => h('div', { class: 'mhead' }, n)),
+    cells.slice(0, rows * 7).map((d) => {
+      const items = itemsOn(d);
+      const colors = [...new Set(items.map((i) => (member(i.t.assignee) || { color: 'var(--muted)' }).color))].slice(0, 3);
+      const cls = 'mcell' + (d.getMonth() !== first.getMonth() ? ' out' : '') + (sameDay(d, today) ? ' today' : '') + (sameDay(d, planDay) ? ' sel' : '');
+      return h('button', { class: cls, onclick: () => { planDay = d; render(); }, 'aria-label': `${d.getDate()} ${MONTHS_GEN[d.getMonth()]}, zadań: ${items.length}`, 'aria-pressed': String(sameDay(d, planDay)) },
+        h('span', {}, d.getDate()),
+        h('span', { class: 'mdots' }, colors.map((c) => h('i', { style: `--c:${c}` }))),
+        h('span', { class: 'mcount' }, items.length ? items.length : ''));
+    }));
+  return [
+    planNav(title, () => { planAnchor = new Date(first.getFullYear(), first.getMonth() - 1, 1); render(); },
+      () => { planAnchor = new Date(first.getFullYear(), first.getMonth() + 1, 1); render(); }),
+    grid,
+    h('h2', {}, `${DAY_SHORT[weekdayIdx(planDay)]} ${planDay.getDate()} ${MONTHS_GEN[planDay.getMonth()]}`),
+    dayBlock(planDay, { showHeader: false }),
+    isParent() && h('button', { class: 'btn ghost', onclick: () => taskForm(null, { date: dayKey(planDay) }) }, '+ Dodaj zadanie na ten dzień')];
+}
+function renderPlan() {
+  return h('section', {},
+    h('h1', {}, 'Plan'),
+    h('p', { class: 'sub' }, isParent() ? 'Zadania na kolejne dni. Dotknij zadania, żeby je zmienić, albo „+”, żeby dodać nowe.' : 'Twoje zadania na kolejne dni.'),
+    isParent() && state.members.length > 1 && h('div', { class: 'chips filter', role: 'group', 'aria-label': 'Filtr osoby' },
+      h('button', { class: 'chip small', 'aria-pressed': String(!filterMember), onclick: () => { filterMember = null; render(); } }, 'Wszyscy'),
+      state.members.map((m) => h('button', { class: 'chip small', 'aria-pressed': String(filterMember === m.id), onclick: () => { filterMember = m.id; render(); } }, who(m)))),
+    h('div', { class: 'seg', role: 'group' },
+      h('button', { 'aria-pressed': String(planMode === 'week'), onclick: () => { planMode = 'week'; render(); } }, 'Tydzień'),
+      h('button', { 'aria-pressed': String(planMode === 'month'), onclick: () => { planMode = 'month'; render(); } }, 'Miesiąc')),
+    planMode === 'week' ? weekView() : monthView());
+}
+
 function renderNav() {
-  const items = [['tasks', '✓', 'Dziś']];
+  const items = [['tasks', '✓', 'Dziś'], ['plan', '▦', 'Plan']];
   if (isParent()) items.push(['stats', '◔', 'Podział']);
   items.push(['home', '⌂', 'Dom']);
   return items.map(([id, icon, label]) =>
@@ -598,7 +739,7 @@ function render() {
   }
   if (tab === 'stats' && !isParent()) tab = 'tasks';
   nav.hidden = false;
-  app.replaceChildren(tab === 'stats' ? renderStats() : tab === 'home' ? renderHome() : renderTasks());
+  app.replaceChildren(tab === 'stats' ? renderStats() : tab === 'home' ? renderHome() : tab === 'plan' ? renderPlan() : renderTasks());
   nav.replaceChildren(...renderNav());
 }
 
@@ -613,7 +754,7 @@ Cloud.onUpdate = (statusOnly) => {
 render();
 Cloud.init();
 setTimeout(() => { Push.resave().catch(() => {}); }, 5000);   // odśwież zapis subskrypcji push po synchronizacji
-setInterval(() => { if (tab === 'tasks' && state.members.length && idle()) render(); }, 60000);   // przeliczanie „Zaraz” i „Spóźnione”
+setInterval(() => { if ((tab === 'tasks' || tab === 'plan') && state.members.length && idle()) render(); }, 60000);   // przeliczanie „Zaraz” i „Spóźnione”
 document.addEventListener('visibilitychange', () => { if (idle() && tab === 'tasks') render(); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
