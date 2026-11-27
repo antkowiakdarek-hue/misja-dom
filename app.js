@@ -24,8 +24,8 @@ let tab = 'tasks';
 let range = 'week';
 let filterMember = null;
 let planMode = 'week';                 // 'week' | 'month'
-let planAnchor = new Date();           // dzień wyznaczający oglądany tydzień/miesiąc
-let planDay = new Date();              // wybrany dzień w widoku miesiąca
+let planAnchor = new Date(new Date().setHours(0, 0, 0, 0));   // pierwszy dzień oglądanego okna (7 lub 30 dni)
+let planDay = new Date(new Date().setHours(0, 0, 0, 0));      // wybrany dzień w widoku 30 dni
 let draftPeople = [];
 let draftSample = true;
 
@@ -476,7 +476,7 @@ function cloudSection() {
         () => { Push.disable().finally(() => Cloud.leave()); }, 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
 }
 
-const APP_VERSION = '2026-11-27-d';
+const APP_VERSION = '2026-11-27-e';
 
 /* Wymusza pobranie najnowszych plików i nowego service workera (przydatne na iPhonie). */
 async function refreshApp() {
@@ -614,8 +614,7 @@ function shiftDay(n) {
 }
 /* Plan: tydzień o 7 dni albo miesiąc o 1. */
 function shiftPlan(n) {
-  if (planMode === 'week') planAnchor = addDays(startOfWeek(planAnchor), 7 * n);
-  else planAnchor = new Date(planAnchor.getFullYear(), planAnchor.getMonth() + n, 1);
+  planAnchor = addDays(startOfDay(planAnchor), (planMode === 'week' ? 7 : 30) * n);
   render();
   return true;
 }
@@ -790,14 +789,15 @@ function planNav(title, onPrev, onNext) {
     h('button', { class: 'btn ghost small', onclick: onPrev, 'aria-label': 'Wstecz' }, '‹'),
     h('strong', {}, title),
     h('div', { class: 'row' },
-      h('button', { class: 'btn ghost small', onclick: () => { planAnchor = new Date(); planDay = new Date(); render(); } }, 'Dziś'),
+      h('button', { class: 'btn ghost small', onclick: () => { planAnchor = startOfDay(new Date()); planDay = startOfDay(new Date()); render(); } }, 'Dziś'),
       h('button', { class: 'btn ghost small', onclick: onNext, 'aria-label': 'Dalej' }, '›')));
 }
+/* Okno kroczące: 7 dni licząc od wybranego dnia (domyślnie od dziś), przesuwane co 7 dni. */
 function weekView() {
-  const start = startOfWeek(planAnchor);
+  const start = startOfDay(planAnchor);
   const end = addDays(start, 6);
   const title = `${start.getDate()} ${MONTHS_SHORT[start.getMonth()]} – ${end.getDate()} ${MONTHS_SHORT[end.getMonth()]} ${end.getFullYear()}`;
-  const floating = weekFloating(start);
+  const floating = weekFloating(startOfWeek(start));
   return [
     planNav(title, () => { planAnchor = addDays(start, -7); render(); }, () => { planAnchor = addDays(start, 7); render(); }),
     ...Array.from({ length: 7 }, (_, i) => dayBlock(addDays(start, i))),
@@ -805,28 +805,33 @@ function weekView() {
       h('div', { class: 'dayhead' }, h('strong', {}, 'W ciągu tygodnia'), h('span', { class: 'sub' }, 'bez konkretnego dnia')),
       floating.map((i) => planRow(i, null)))];
 }
+/* Okno kroczące: 30 dni licząc od wybranego dnia (domyślnie od dziś), przesuwane co 30 dni. */
+const MONTH_SPAN = 30;
 function monthView() {
-  const first = startOfMonth(planAnchor);
-  const gridStart = startOfWeek(first);
-  const title = `${MONTHS_FULL[first.getMonth()]} ${first.getFullYear()}`;
-  const today = new Date();
-  const cells = Array.from({ length: 42 }, (_, i) => addDays(gridStart, i));
-  // nie pokazuj całego pustego ostatniego wiersza
-  const rows = cells[35].getMonth() === first.getMonth() ? 6 : 5;
+  const start = startOfDay(planAnchor);
+  const end = addDays(start, MONTH_SPAN - 1);
+  const title = `${start.getDate()} ${MONTHS_SHORT[start.getMonth()]} – ${end.getDate()} ${MONTHS_SHORT[end.getMonth()]} ${end.getFullYear()}`;
+  const today = startOfDay(new Date());
+  // wybrany dzień musi mieścić się w oknie: jeśli nie, wybierz dziś (gdy jest w oknie) albo pierwszy dzień okna
+  if (planDay < start || planDay > end) planDay = (today >= start && today <= end) ? today : start;
+  const days = Array.from({ length: MONTH_SPAN }, (_, i) => addDays(start, i));
+  const lead = weekdayIdx(start);   // puste pola, żeby dni stały pod właściwymi dniami tygodnia
   const grid = h('div', { class: 'mgrid' },
     DAY_SHORT.map((n) => h('div', { class: 'mhead' }, n)),
-    cells.slice(0, rows * 7).map((d) => {
+    Array.from({ length: lead }, () => h('div', { class: 'mblank' })),
+    days.map((d, i) => {
       const items = itemsOn(d);
-      const colors = [...new Set(items.map((i) => (member(i.t.assignee) || { color: 'var(--muted)' }).color))].slice(0, 3);
-      const cls = 'mcell' + (d.getMonth() !== first.getMonth() ? ' out' : '') + (sameDay(d, today) ? ' today' : '') + (sameDay(d, planDay) ? ' sel' : '');
+      const colors = [...new Set(items.map((x) => (member(x.t.assignee) || { color: 'var(--muted)' }).color))].slice(0, 3);
+      const cls = 'mcell' + (sameDay(d, today) ? ' today' : '') + (sameDay(d, planDay) ? ' sel' : '');
+      const monthMark = (i === 0 || d.getDate() === 1) ? h('span', { class: 'mmon' }, MONTHS_SHORT[d.getMonth()]) : null;
       return h('button', { class: cls, onclick: () => { planDay = d; render(); }, 'aria-label': `${d.getDate()} ${MONTHS_GEN[d.getMonth()]}, zadań: ${items.length}`, 'aria-pressed': String(sameDay(d, planDay)) },
         h('span', {}, d.getDate()),
+        monthMark,
         h('span', { class: 'mdots' }, colors.map((c) => h('i', { style: `--c:${c}` }))),
         h('span', { class: 'mcount' }, items.length ? items.length : ''));
     }));
   return [
-    planNav(title, () => { planAnchor = new Date(first.getFullYear(), first.getMonth() - 1, 1); render(); },
-      () => { planAnchor = new Date(first.getFullYear(), first.getMonth() + 1, 1); render(); }),
+    planNav(title, () => { planAnchor = addDays(start, -MONTH_SPAN); render(); }, () => { planAnchor = addDays(start, MONTH_SPAN); render(); }),
     grid,
     h('h2', {}, `${DAY_SHORT[weekdayIdx(planDay)]} ${planDay.getDate()} ${MONTHS_GEN[planDay.getMonth()]}`),
     dayBlock(planDay, { showHeader: false }),
@@ -840,8 +845,8 @@ function renderPlan() {
       h('button', { class: 'chip small', 'aria-pressed': String(!filterMember), onclick: () => { filterMember = null; render(); } }, 'Wszyscy'),
       state.members.map((m) => h('button', { class: 'chip small', 'aria-pressed': String(filterMember === m.id), onclick: () => { filterMember = m.id; render(); } }, who(m)))),
     h('div', { class: 'seg', role: 'group' },
-      h('button', { 'aria-pressed': String(planMode === 'week'), onclick: () => { planMode = 'week'; render(); } }, 'Tydzień'),
-      h('button', { 'aria-pressed': String(planMode === 'month'), onclick: () => { planMode = 'month'; render(); } }, 'Miesiąc')),
+      h('button', { 'aria-pressed': String(planMode === 'week'), onclick: () => { planMode = 'week'; render(); } }, '7 dni'),
+      h('button', { 'aria-pressed': String(planMode === 'month'), onclick: () => { planMode = 'month'; render(); } }, '30 dni')),
     planMode === 'week' ? weekView() : monthView());
 }
 

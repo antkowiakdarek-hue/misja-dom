@@ -234,6 +234,8 @@ main { touch-action: pan-y pinch-zoom; }   /* pionowe przewijanie zostaje, pozio
 .mcell.out { opacity: .4; }
 .mcell.today { border-color: var(--primary); font-weight: 700; }
 .mcell.sel { background: var(--soft); border-color: var(--primary); }
+.mblank { min-height: 56px; }
+.mmon { font-size: .6rem; color: var(--primary); text-transform: uppercase; letter-spacing: .03em; line-height: 1; }
 .mdots { display: flex; gap: 2px; min-height: 8px; }
 .mdots i { width: 6px; height: 6px; border-radius: 50%; background: var(--c); }
 .mcount { font-size: .65rem; color: var(--muted); min-height: 10px; }
