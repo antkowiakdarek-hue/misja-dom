@@ -31,6 +31,7 @@ const Cloud = (() => {
         task_time: o.time || null, days: o.days && o.days.length ? o.days : null, due_date: o.date || null,
         skip_dates: o.skips && o.skips.length ? o.skips : null,
         status: o.status === 'pending' ? 'pending' : 'active', proposed_by: o.proposedBy || null,
+        transfer_of: o.transferOf || null, transfer_day: o.transferDay || null,
         assignee: o.assignee || null, pos: i,
       }),
       fromRow: (r) => ({
@@ -38,6 +39,7 @@ const Cloud = (() => {
         time: r.task_time || '', days: r.days || [], date: r.due_date || '', assignee: r.assignee || null,
         skips: r.skip_dates || [],
         status: r.status === 'pending' ? 'pending' : 'active', proposedBy: r.proposed_by || '',
+        transferOf: r.transfer_of || '', transferDay: r.transfer_day || '',
         created: r.created_at ? Date.parse(r.created_at) : 0,   // do oznaczania zaległości w planie
       }),
     },
@@ -144,8 +146,8 @@ const Cloud = (() => {
       if (up.length) {
         let { error } = await sb.from(name).upsert(up);
         // baza bez nowych kolumn (jeszcze nie zaktualizowana): zapisz bez nich zamiast psuć synchronizację
-        if (error && /column/i.test(error.message || '') && /(skip_dates|proposed_by|status)/.test(error.message || '')) {
-          up.forEach((r) => { delete r.skip_dates; delete r.proposed_by; delete r.status; });
+        if (error && /column/i.test(error.message || '') && /(skip_dates|proposed_by|status|transfer_of|transfer_day)/.test(error.message || '')) {
+          up.forEach((r) => { delete r.skip_dates; delete r.proposed_by; delete r.status; delete r.transfer_of; delete r.transfer_day; });
           ({ error } = await sb.from(name).upsert(up));
         }
         if (error) throw error;

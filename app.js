@@ -38,6 +38,7 @@ function load() {
         if (!REPEATS[t.repeat]) t.repeat = 'none';
         t.time = t.time || ''; t.days = Array.isArray(t.days) ? t.days : []; t.date = t.date || '';
         t.status = t.status === 'pending' ? 'pending' : 'active'; t.proposedBy = t.proposedBy || '';
+        t.transferOf = t.transferOf || ''; t.transferDay = t.transferDay || '';
       });
       return s;
     }
@@ -136,6 +137,53 @@ function approverOf(t) {
 }
 /* Kto może dodawać zadania: rodzic zawsze, dziecko (jako propozycje) tylko w podłączonym domu z wybranym profilem. */
 function canAdd() { return isParent() || (Cloud.connected && Boolean(meId())); }
+
+/* ---------- przekazywanie zadań ---------- */
+/* Przekazać można zadanie z godziną, które się ma, jeśli do terminu zostało co najmniej 30 minut.
+   Dotyczy jednego dnia. Prośba to oczekujące zadanie jednorazowe dla adresata; do czasu przejęcia zadanie zostaje u nadawcy. */
+const TRANSFER_MIN = 30;
+function hhmmOf(d) { return `${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+function dueAt(dateKey, time) {
+  const [y, mo, d] = dateKey.split('-').map(Number);
+  const [hh, mm] = time.split(':').map(Number);
+  return new Date(y, mo - 1, d, hh, mm, 0);
+}
+function transferCutoff(dateKey, time) { return new Date(dueAt(dateKey, time).getTime() - TRANSFER_MIN * 60000); }
+function isTransfer(t) { return Boolean(t.transferOf); }
+function pendingTransferOf(t, dateKey) {
+  return state.tasks.find((x) => isPending(x) && x.transferOf === t.id && x.transferDay === dateKey) || null;
+}
+function canTransfer(t, day) {
+  if (!Cloud.connected || !meId() || isPending(t) || t.deleted) return false;
+  if (t.assignee !== meId() || !isTimed(t) || !occursOn(t, day)) return false;
+  const dk = dayKey(day);
+  if (doneOn(t, day) || pendingTransferOf(t, dk)) return false;
+  return new Date() < transferCutoff(dk, t.time);
+}
+function dayWordFor(day) {
+  const diff = Math.round((startOfDay(day) - startOfDay(new Date())) / 864e5);
+  return diff === 0 ? 'dzisiaj' : diff === 1 ? 'jutro' : `${DAY_SHORT[weekdayIdx(day)]} ${day.getDate()} ${MONTHS_SHORT[day.getMonth()]}`;
+}
+function sendTransfer(t, dk, recipientId) {
+  if (new Date() >= transferCutoff(dk, t.time)) return notice('Za późno', `Do terminu zostało mniej niż ${TRANSFER_MIN} minut, więc zadanie zostaje u Ciebie.`);
+  state.tasks.push({
+    id: uid(), title: t.title, weight: t.weight, repeat: 'none', time: t.time, days: [], date: dk, assignee: recipientId, skips: [],
+    created: Date.now(), status: 'pending', proposedBy: meId(), transferOf: t.id, transferDay: dk,
+  });
+  save(); render();
+}
+function transferDialog(t, day) {
+  const dk = dayKey(day);
+  const others = state.members.filter((m) => m.id !== meId());
+  if (!others.length) return notice('Brak adresata', 'W domu nie ma nikogo innego, komu można przekazać zadanie.');
+  const cutoff = transferCutoff(dk, t.time);
+  const chips = others.map((m) => h('button', { type: 'button', class: 'chip', onclick: () => { closeDialog(); sendTransfer(t, dk, m.id); } }, who(m), ' · ', ROLES[m.role]));
+  openDialog('Przekaż zadanie',
+    h('p', {}, `„${t.title}” (${t.time}, ${dayWordFor(day)}). Wybierz, kto ma je przejąć.`),
+    h('div', { class: 'chips' }, chips),
+    h('p', { class: 'sub hint' }, `Zadanie zostaje u Ciebie, dopóki ktoś go nie przejmie. Adresat może odpowiedzieć do ${hhmmOf(cutoff)}; bez odpowiedzi albo po odrzuceniu zadanie zostaje u Ciebie. Przekazanie dotyczy tylko tego dnia.`),
+    h('div', { class: 'actions' }, cancelBtn()));
+}
 
 /* ---------- harmonogram ---------- */
 function periodStart(task) {
@@ -552,7 +600,7 @@ function cloudSection() {
         () => { Push.disable().finally(() => Cloud.leave()); }, 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
 }
 
-const APP_VERSION = '2026-11-27-h';
+const APP_VERSION = '2026-11-27-i';
 
 /* Wymusza pobranie najnowszych plików i nowego service workera (przydatne na iPhonie). */
 async function refreshApp() {
@@ -673,6 +721,11 @@ function askDeleteTask(task, d) {
 
 /* ---------- potwierdzanie propozycji ---------- */
 function approveTask(t) {
+  if (isTransfer(t) && new Date() >= transferCutoff(t.transferDay || t.date, t.time)) {
+    notice('Za późno na przejęcie', `Do terminu zostało mniej niż ${TRANSFER_MIN} minut, więc zadanie zostaje u nadawcy.`);
+    rejectTask(t);
+    return;
+  }
   t.status = 'active';          // proposedBy zostaje (żeby autor dostał informację o potwierdzeniu)
   save(); render();
 }
@@ -683,17 +736,22 @@ function rejectTask(t) {
 function proposalText(t) {
   const who_ = member(t.proposedBy);
   const when = isTimed(t) ? ` o ${t.time}` : '';
+  if (isTransfer(t)) {
+    const until = isTimed(t) ? ` Odpowiedz do ${hhmmOf(transferCutoff(t.transferDay || t.date, t.time))}.` : '';
+    return `${who_ ? who_.name : 'Ktoś'} prosi o przejęcie: „${t.title}” (${scheduleText(t)}${when}).${until}`;
+  }
   return `${who_ ? who_.name : 'Ktoś'} proponuje: „${t.title}” (${scheduleText(t)}${when}).`;
 }
 function approveDialog(t) {
-  openDialog('Potwierdzić zadanie?', h('p', {}, proposalText(t)),
+  const tr = isTransfer(t);
+  openDialog(tr ? 'Przejąć zadanie?' : 'Potwierdzić zadanie?', h('p', {}, proposalText(t)),
     h('div', { class: 'actions stack' },
-      h('button', { type: 'button', class: 'btn', onclick: () => { closeDialog(); approveTask(t); } }, 'Potwierdź'),
-      h('button', { type: 'button', class: 'btn danger', onclick: () => { closeDialog(); rejectTask(t); } }, 'Odrzuć (autor dostanie informację)'),
+      h('button', { type: 'button', class: 'btn', onclick: () => { closeDialog(); approveTask(t); } }, tr ? 'Przejmij' : 'Potwierdź'),
+      h('button', { type: 'button', class: 'btn danger', onclick: () => { closeDialog(); rejectTask(t); } }, tr ? 'Odrzuć (zadanie zostaje u nadawcy)' : 'Odrzuć (autor dostanie informację)'),
       cancelBtn()));
 }
 function withdrawDialog(t) {
-  confirmDelete(`Wycofać propozycję „${t.title}”?`, () => rejectTask(t), 'Tak, wycofaj');
+  confirmDelete(isTransfer(t) ? `Wycofać prośbę o przejęcie „${t.title}”? Zadanie zostanie u Ciebie.` : `Wycofać propozycję „${t.title}”?`, () => rejectTask(t), 'Tak, wycofaj');
 }
 /* Karta zadania czekającego na potwierdzenie (blada, z przyciskami). */
 function pendingCard(t) {
@@ -701,18 +759,21 @@ function pendingCard(t) {
   const approver = approverOf(t);
   const mine = canApprove(t), own = isAuthor(t);
   const timed = isTimed(t);
-  const whenLabel = timed ? t.time : t.date ? t.date.slice(8, 10) + '.' + t.date.slice(5, 7) : 'bez godziny';
+  const tr = isTransfer(t);
+  const whenLabel = timed ? (tr && t.date ? `${t.date.slice(8, 10)}.${t.date.slice(5, 7)} ${t.time}` : t.time) : t.date ? t.date.slice(8, 10) + '.' + t.date.slice(5, 7) : 'bez godziny';
+  const until = tr && timed ? hhmmOf(transferCutoff(t.transferDay || t.date, t.time)) : '';
   return h('div', { class: 'card pending' },
-    h('div', { class: 'time' + (timed ? '' : ' small') }, whenLabel),
-    h('button', { class: 'body', disabled: !(own || (isParent() && !mine)), onclick: () => taskForm(t), 'aria-label': `Zadanie czeka na potwierdzenie: ${t.title}` },
-      h('div', { class: 'title' }, t.title),
-      h('div', { class: 'meta' }, dots(t.weight), h('span', {}, scheduleText(t)), m && who(m),
-        h('span', { class: 'badge wait' }, 'Czeka na potwierdzenie'),
+    h('div', { class: 'time' + (timed && !(tr && t.date) ? '' : ' small') }, whenLabel),
+    h('button', { class: 'body', disabled: tr || !(own || (isParent() && !mine)), onclick: () => taskForm(t), 'aria-label': `Czeka na potwierdzenie: ${t.title}` },
+      h('div', { class: 'title' }, (tr ? '⇄ ' : '') + t.title),
+      h('div', { class: 'meta' }, dots(t.weight), tr ? null : h('span', {}, scheduleText(t)), m && who(m),
+        h('span', { class: 'badge wait' }, tr ? 'Prośba o przejęcie' : 'Czeka na potwierdzenie'),
         author && h('span', {}, 'od: ', author.name),
-        !mine && h('span', {}, `potwierdza: ${approver}`))),
+        tr && until && h('span', {}, `odpowiedz do ${until}`),
+        !mine && !tr && h('span', {}, `potwierdza: ${approver}`))),
     h('div', { class: 'pbtns' },
-      mine && h('button', { class: 'btn small', onclick: () => approveTask(t) }, 'Potwierdź'),
-      mine && h('button', { class: 'btn ghost small', onclick: () => confirmDelete(`Odrzucić propozycję „${t.title}”? Autor dostanie informację.`, () => rejectTask(t), 'Tak, odrzuć') }, 'Odrzuć'),
+      mine && h('button', { class: 'btn small', onclick: () => approveTask(t) }, tr ? 'Przejmij' : 'Potwierdź'),
+      mine && h('button', { class: 'btn ghost small', onclick: () => confirmDelete(tr ? `Odrzucić prośbę o przejęcie „${t.title}”? Zadanie zostanie u nadawcy.` : `Odrzucić propozycję „${t.title}”? Autor dostanie informację.`, () => rejectTask(t), 'Tak, odrzuć') }, 'Odrzuć'),
       !mine && own && h('button', { class: 'btn ghost small', onclick: () => withdrawDialog(t) }, 'Wycofaj')));
 }
 /* Wszystkie propozycje, które mnie dotyczą (rodzic: wszystkie w domu; dziecko: własne). */
@@ -764,12 +825,16 @@ function taskCard({ t, done, status }) {
     : status === 'soon' ? h('span', { class: 'badge soon' }, 'Zaraz') : null;
   const editable = (parent || isOwnSelf(t)) && !past && !t.deleted;
   const viewDay = addDays(startOfDay(new Date()), dayOffset);
+  const outgoing = !t.deleted && !past ? pendingTransferOf(t, dayKey(viewDay)) : null;   // moja prośba o przekazanie tego zadania
+  const outTo = outgoing ? member(outgoing.assignee) : null;
   return h('div', { class: `card st-${status}` + (done ? ' done' : '') },
     h('div', { class: 'time' + (timed ? '' : ' small') }, timed ? t.time : t.repeat === 'weekly' ? 'w tygodniu' : 'w ciągu dnia'),
     h('button', { class: 'body', disabled: !editable, onclick: () => taskForm(t, { day: viewDay }), 'aria-label': editable ? `Edytuj: ${t.title}` : t.title },
       h('div', { class: 'title' }, t.title),
       h('div', { class: 'meta' }, dots(t.weight), t.deleted ? h('span', {}, 'zadanie usunięte') : h('span', {}, scheduleText(t)),
-        done ? h('span', {}, '✓ ', m ? m.name : 'ktoś', ' · ', fmtTime(done.ts)) : (m && who(m)), badge)),
+        done ? h('span', {}, '✓ ', m ? m.name : 'ktoś', ' · ', fmtTime(done.ts)) : (m && who(m)), badge,
+        outgoing && h('span', { class: 'badge wait' }, `Przekazanie czeka: ${outTo ? outTo.name : '…'}`))),
+    !past && !done && canTransfer(t, viewDay) && h('button', { class: 'icon-btn', 'aria-label': `Przekaż zadanie: ${t.title}`, title: 'Przekaż komuś', onclick: () => transferDialog(t, viewDay) }, '⇄'),
     editable && h('button', { class: 'icon-btn', 'aria-label': `Usuń zadanie: ${t.title}`, title: 'Usuń zadanie', onclick: () => askDeleteTask(t, viewDay) }, '✕'),
     isToday
       ? (done
@@ -902,7 +967,7 @@ function planRow({ t, done, status }, d) {
   const disabled = pending ? !onTap : ((!parent && !isOwnSelf(t)) || past);
   return h('button', { class: `prow st-${status}`, disabled, onclick: onTap || undefined, 'aria-label': pending ? `${t.title} (czeka na potwierdzenie)` : t.title },
     h('span', { class: 'ptime' }, isTimed(t) ? t.time : ''),
-    h('span', { class: 'ptitle' }, t.title),
+    h('span', { class: 'ptitle' }, (isTransfer(t) && pending ? '⇄ ' : '') + t.title),
     m && h('i', { class: 'dot', style: `--c:${m.color}`, title: m.name }),
     h('span', { class: 'pmark', 'aria-hidden': 'true' }, MARK[status]));
 }
