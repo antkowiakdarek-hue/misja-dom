@@ -199,6 +199,11 @@ input[type="time"], input[type="date"] { width: 100%; padding: 10px 12px; border
 .dayhead strong { flex: 1; }
 .dayhead.today strong { color: var(--primary); }
 .dayhead .sub { margin: 0; font-size: .85rem; }
+@keyframes slide-from-right { from { transform: translateX(28px); opacity: .35; } to { transform: none; opacity: 1; } }
+@keyframes slide-from-left { from { transform: translateX(-28px); opacity: .35; } to { transform: none; opacity: 1; } }
+.slide-from-right { animation: slide-from-right .2s ease-out; }
+.slide-from-left { animation: slide-from-left .2s ease-out; }
+main { touch-action: pan-y pinch-zoom; }   /* pionowe przewijanie zostaje, poziomy ruch obsługujemy sami */
 .actions.stack { flex-direction: column; align-items: stretch; }
 .actions.stack .btn { width: 100%; text-align: center; }
 .icon-btn.add { background: var(--soft); color: var(--primary); font-size: 1.2rem; }

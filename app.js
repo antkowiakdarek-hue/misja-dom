@@ -476,7 +476,7 @@ function cloudSection() {
         () => { Push.disable().finally(() => Cloud.leave()); }, 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
 }
 
-const APP_VERSION = '2026-11-27-c';
+const APP_VERSION = '2026-11-27-d';
 
 /* Wymusza pobranie najnowszych plików i nowego service workera (przydatne na iPhonie). */
 async function refreshApp() {
@@ -606,8 +606,21 @@ function dayLabel(offset) {
   const d = addDays(startOfDay(new Date()), offset);
   return `${DAY_SHORT[weekdayIdx(d)]} ${d.getDate()} ${MONTHS_SHORT[d.getMonth()]}`;
 }
+function shiftDay(n) {
+  const next = Math.max(-HISTORY_DAYS, dayOffset + n);
+  if (next === dayOffset) return false;
+  dayOffset = next; render();
+  return true;
+}
+/* Plan: tydzień o 7 dni albo miesiąc o 1. */
+function shiftPlan(n) {
+  if (planMode === 'week') planAnchor = addDays(startOfWeek(planAnchor), 7 * n);
+  else planAnchor = new Date(planAnchor.getFullYear(), planAnchor.getMonth() + n, 1);
+  render();
+  return true;
+}
 function dayNav() {
-  const go = (n) => { dayOffset = Math.max(-HISTORY_DAYS, dayOffset + n); render(); };
+  const go = (n) => { shiftDay(n); };
   return h('div', { class: 'plan-nav daynav' },
     h('button', { class: 'btn ghost small', disabled: dayOffset <= -HISTORY_DAYS, onclick: () => go(-1), 'aria-label': 'Poprzedni dzień' }, '‹'),
     h('strong', {}, dayLabel(dayOffset)),
@@ -854,6 +867,34 @@ function render() {
   app.replaceChildren(tab === 'stats' ? renderStats() : tab === 'home' ? renderHome() : tab === 'plan' ? renderPlan() : renderTasks());
   nav.replaceChildren(...renderNav());
 }
+
+/* ---------- gest przesunięcia palcem: w lewo = dalej, w prawo = wstecz ---------- */
+(function enableSwipe() {
+  const area = document.getElementById('app');
+  let start = null;
+  const interactive = (el) => el && el.closest && el.closest('input, select, textarea, dialog');
+  area.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1 || dlg.open || interactive(e.target)) { start = null; return; }
+    const t = e.touches[0];
+    start = { x: t.clientX, y: t.clientY, at: Date.now() };
+  }, { passive: true });
+  area.addEventListener('touchend', (e) => {
+    if (!start || dlg.open) { start = null; return; }
+    const t = e.changedTouches[0];
+    const dx = t.clientX - start.x, dy = t.clientY - start.y, dt = Date.now() - start.at;
+    start = null;
+    // wyraźnie poziomy, wystarczająco długi i szybki ruch (żeby nie mylić z przewijaniem)
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.6 || dt > 800) return;
+    const n = dx < 0 ? 1 : -1;
+    let moved = false;
+    if (tab === 'tasks') moved = shiftDay(n);
+    else if (tab === 'plan') moved = shiftPlan(n);
+    if (moved && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const sec = area.firstElementChild;
+      if (sec) sec.classList.add(n > 0 ? 'slide-from-right' : 'slide-from-left');
+    }
+  }, { passive: true });
+})();
 
 /* ---------- start ---------- */
 const idle = () => { const a = document.activeElement; return !document.hidden && !dlg.open && !(a && (a.tagName === 'INPUT' || a.tagName === 'SELECT')); };
