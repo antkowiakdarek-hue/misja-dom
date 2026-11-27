@@ -127,6 +127,7 @@ function todayItems(now) {
   const dk = dayKey(now), wd = weekdayIdx(now), nowMin = now.getHours() * 60 + now.getMinutes();
   const items = [];
   for (const t of state.tasks) {
+    if (t.skips && t.skips.includes(dk)) continue;   // dzisiaj pominięte
     let show = false, late = false;
     if (t.repeat === 'daily' || t.repeat === 'weekly') show = true;
     else if (t.repeat === 'days') show = t.days.includes(wd);
@@ -151,6 +152,7 @@ function todayItems(now) {
 /* ---------- plan: zadania w wybranym dniu ---------- */
 /* Czy zadanie wypada w danym dniu? "Raz w tygodniu" i "bez daty" pokazujemy osobno (blok tygodnia). */
 function occursOn(t, d) {
+  if (t.skips && t.skips.includes(dayKey(d))) return false;   // dzień pominięty przez rodzica
   if (t.repeat === 'daily') return true;
   if (t.repeat === 'days') return t.days.includes(weekdayIdx(d));
   if (t.repeat === 'none') return Boolean(t.date) && t.date === dayKey(d);
@@ -231,7 +233,11 @@ function pruneOld() {
   const before = state.log.length + state.tasks.length;
   state.log = state.log.filter((l) => l.ts >= cutoff);
   state.tasks = state.tasks.filter((t) => !(t.repeat === 'none' && t.date && t.date < cutKey));
-  return state.log.length + state.tasks.length !== before;
+  let skipsChanged = false;
+  for (const t of state.tasks) {
+    if (t.skips && t.skips.some((k) => k < cutKey)) { t.skips = t.skips.filter((k) => k >= cutKey); skipsChanged = true; }
+  }
+  return skipsChanged || state.log.length + state.tasks.length !== before;
 }
 
 /* ---------- okna ---------- */
@@ -284,6 +290,7 @@ function taskForm(task, preset) {
   const t = task || { title: '', weight: 2, repeat: p.date ? 'none' : 'daily', time: '', days: [], date: p.date || '', assignee: p.assignee || null };
   let weight = t.weight, repeat = t.repeat;
   const days = new Set(t.days.length ? t.days : ALL_DAYS);
+  const skips = new Set(t.skips || []);
 
   const title = h('input', { type: 'text', id: 'f-title', value: t.title, maxlength: 60, required: true, placeholder: 'np. Opróżnić zmywarkę' });
   const time = h('input', { type: 'time', id: 'f-time', value: t.time });
@@ -293,6 +300,8 @@ function taskForm(task, preset) {
   const timeWrap = h('div', {}, h('label', { for: 'f-time' }, 'O której godzinie?'), time);
   const dayWrap = h('div', {}, h('label', {}, 'W które dni?'), dayBox);
   const dateWrap = h('div', {}, h('label', { for: 'f-date' }, 'Data (puste = do skutku)'), date);
+  const skipBox = h('div', { class: 'chips' });
+  const skipWrap = h('div', {}, h('label', {}, 'Pominięte dni (dotknij, żeby przywrócić)'), skipBox);
   const repeatSel = h('select', { id: 'f-repeat', onchange: (e) => { repeat = e.target.value; if (repeat === 'days' && days.size === 0) ALL_DAYS.forEach((d) => days.add(d)); drawDynamic(); } },
     Object.entries(REPEATS).map(([v, l]) => h('option', { value: v, selected: v === t.repeat }, l)));
   const assignee = h('select', { id: 'f-assignee' },
@@ -309,6 +318,12 @@ function taskForm(task, preset) {
     dayWrap.hidden = repeat !== 'days';
     dateWrap.hidden = repeat !== 'none';
     timeWrap.hidden = repeat === 'weekly' || (repeat === 'none' && !date.value);
+    const todayKey = dayKey(new Date());
+    const upcoming = [...skips].filter((k) => k >= todayKey).sort();
+    skipBox.replaceChildren(...upcoming.map((k) => h('button', {
+      type: 'button', class: 'chip small', onclick: () => { skips.delete(k); drawDynamic(); },
+    }, `${k.slice(8, 10)}.${k.slice(5, 7)} ✕`)));
+    skipWrap.hidden = upcoming.length === 0 || (repeat !== 'daily' && repeat !== 'days');
   }
   drawDynamic();
 
@@ -324,6 +339,7 @@ function taskForm(task, preset) {
         days: repeat === 'days' ? [...days].sort() : [],
         date: repeat === 'none' ? date.value : '',
         assignee: assignee.value || null,
+        skips: [...skips].sort(),
       };
       if (isNew) state.tasks.push({ id: uid(), ...data, created: Date.now() }); else Object.assign(task, data);
       save(); closeDialog(); render();
@@ -334,8 +350,9 @@ function taskForm(task, preset) {
     h('label', { for: 'f-repeat' }, 'Jak często?'), repeatSel,
     dayWrap, dateWrap, timeWrap,
     h('label', {}, 'Ile wysiłku to wymaga?'), weightBox,
+    skipWrap,
     h('div', { class: 'actions' },
-      !isNew && h('button', { type: 'button', class: 'btn danger', onclick: () => askDeleteTask(task) }, 'Usuń'),
+      !isNew && h('button', { type: 'button', class: 'btn danger', onclick: () => askDeleteTask(task, p.day) }, 'Usuń'),
       h('span', { class: 'spacer' }),
       cancelBtn(), h('button', { type: 'submit', class: 'btn' }, 'Zapisz')));
   openDialog(isNew ? 'Nowe zadanie' : 'Edytuj zadanie', form);
@@ -459,7 +476,7 @@ function cloudSection() {
         () => { Push.disable().finally(() => Cloud.leave()); }, 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
 }
 
-const APP_VERSION = '2026-11-27-b';
+const APP_VERSION = '2026-11-27-c';
 
 /* Wymusza pobranie najnowszych plików i nowego service workera (przydatne na iPhonie). */
 async function refreshApp() {
@@ -549,11 +566,33 @@ function renderSetup() {
       h('button', { class: 'btn ghost small', onclick: joinDialog }, 'Mam kod zaproszenia')));
 }
 
-function askDeleteTask(task) {
-  const recurring = task.repeat !== 'none';
-  confirmDelete(
-    `Usunąć zadanie „${task.title}”?` + (recurring ? ' To zadanie się powtarza, więc zniknie też z kolejnych dni.' : '') + ' Historia wykonanych zadań zostanie.',
-    () => { state.tasks = state.tasks.filter((x) => x.id !== task.id); save(); render(); });
+function deleteTaskEverywhere(task) {
+  state.tasks = state.tasks.filter((x) => x.id !== task.id);
+  save(); render();
+}
+function skipTaskOn(task, d) {
+  const k = dayKey(d);
+  task.skips = [...new Set([...(task.skips || []), k])].sort();
+  save(); render();
+}
+/* Usuwanie: przy zadaniu powtarzającym się (codziennie / wybrane dni) pytamy, czy tylko ten dzień, czy całość. */
+function askDeleteTask(task, d) {
+  const repeating = (task.repeat === 'daily' || task.repeat === 'days') && d;
+  if (!repeating) {
+    confirmDelete(
+      `Usunąć zadanie „${task.title}”?` + (task.repeat === 'weekly' ? ' Zniknie z kolejnych tygodni.' : '') + ' Historia wykonanych zadań zostanie.',
+      () => deleteTaskEverywhere(task));
+    return;
+  }
+  const today = startOfDay(new Date());
+  const days = Math.round((startOfDay(d) - today) / 864e5);
+  const dayWord = days === 0 ? 'dzisiaj' : days === 1 ? 'jutro' : `${DAY_SHORT[weekdayIdx(d)]} ${d.getDate()} ${MONTHS_SHORT[d.getMonth()]}`;
+  openDialog('Usunąć zadanie?',
+    h('p', {}, `„${task.title}” powtarza się. Co chcesz usunąć?`),
+    h('div', { class: 'actions stack' },
+      h('button', { type: 'button', class: 'btn', onclick: () => { closeDialog(); skipTaskOn(task, d); } }, `Tylko ${dayWord}`),
+      h('button', { type: 'button', class: 'btn danger', onclick: () => { closeDialog(); deleteTaskEverywhere(task); } }, 'Całe zadanie (wszystkie dni)'),
+      cancelBtn()));
 }
 
 /* Dzień oglądany w zakładce "Dziś": 0 = dziś, -1 = wczoraj ... -14, +1 = jutro. */
@@ -587,13 +626,14 @@ function taskCard({ t, done, status }) {
     : status === 'missed' ? h('span', { class: 'badge bad' }, 'Niezrobione')
     : status === 'soon' ? h('span', { class: 'badge soon' }, 'Zaraz') : null;
   const editable = parent && !past && !t.deleted;
+  const viewDay = addDays(startOfDay(new Date()), dayOffset);
   return h('div', { class: `card st-${status}` + (done ? ' done' : '') },
     h('div', { class: 'time' + (timed ? '' : ' small') }, timed ? t.time : t.repeat === 'weekly' ? 'w tygodniu' : 'w ciągu dnia'),
-    h('button', { class: 'body', disabled: !editable, onclick: () => taskForm(t), 'aria-label': editable ? `Edytuj: ${t.title}` : t.title },
+    h('button', { class: 'body', disabled: !editable, onclick: () => taskForm(t, { day: viewDay }), 'aria-label': editable ? `Edytuj: ${t.title}` : t.title },
       h('div', { class: 'title' }, t.title),
       h('div', { class: 'meta' }, dots(t.weight), t.deleted ? h('span', {}, 'zadanie usunięte') : h('span', {}, scheduleText(t)),
         done ? h('span', {}, '✓ ', m ? m.name : 'ktoś', ' · ', fmtTime(done.ts)) : (m && who(m)), badge)),
-    editable && h('button', { class: 'icon-btn', 'aria-label': `Usuń zadanie: ${t.title}`, title: 'Usuń zadanie', onclick: () => askDeleteTask(t) }, '✕'),
+    editable && h('button', { class: 'icon-btn', 'aria-label': `Usuń zadanie: ${t.title}`, title: 'Usuń zadanie', onclick: () => askDeleteTask(t, viewDay) }, '✕'),
     isToday
       ? (done
         ? (canUndo && h('button', { class: 'btn ghost small', onclick: () => undo(done) }, 'Cofnij'))
@@ -710,10 +750,11 @@ function renderHome() {
 
 /* ---------- plan: tydzień i miesiąc ---------- */
 const MARK = { done: '✓', missed: '!', overdue: '!', upcoming: '' };
-function planRow({ t, done, status }) {
+function planRow({ t, done, status }, d) {
   const parent = isParent();
   const m = done ? member(done.memberId) : member(t.assignee);
-  return h('button', { class: `prow st-${status}`, disabled: !parent, onclick: () => taskForm(t), 'aria-label': t.title },
+  const past = d && startOfDay(d) < startOfDay(new Date());
+  return h('button', { class: `prow st-${status}`, disabled: !parent || past, onclick: () => taskForm(t, d ? { day: d } : null), 'aria-label': t.title },
     h('span', { class: 'ptime' }, isTimed(t) ? t.time : ''),
     h('span', { class: 'ptitle' }, t.title),
     m && h('i', { class: 'dot', style: `--c:${m.color}`, title: m.name }),
@@ -729,7 +770,7 @@ function dayBlock(d, { showHeader = true } = {}) {
       h('strong', {}, `${DAY_SHORT[weekdayIdx(d)]} ${d.getDate()} ${MONTHS_SHORT[d.getMonth()]}`),
       h('span', { class: 'sub' }, items.length ? `${done}/${items.length}` : ''),
       parent && h('button', { class: 'icon-btn add', 'aria-label': `Dodaj zadanie na ${dayKey(d)}`, onclick: () => taskForm(null, { date: dayKey(d) }) }, '+')),
-    items.length ? items.map(planRow) : h('div', { class: 'empty-day' }, 'Brak zadań'));
+    items.length ? items.map((i) => planRow(i, d)) : h('div', { class: 'empty-day' }, 'Brak zadań'));
 }
 function planNav(title, onPrev, onNext) {
   return h('div', { class: 'plan-nav' },
@@ -749,7 +790,7 @@ function weekView() {
     ...Array.from({ length: 7 }, (_, i) => dayBlock(addDays(start, i))),
     floating.length > 0 && h('div', { class: 'dayblock' },
       h('div', { class: 'dayhead' }, h('strong', {}, 'W ciągu tygodnia'), h('span', { class: 'sub' }, 'bez konkretnego dnia')),
-      floating.map(planRow))];
+      floating.map((i) => planRow(i, null)))];
 }
 function monthView() {
   const first = startOfMonth(planAnchor);

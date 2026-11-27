@@ -29,11 +29,13 @@ const Cloud = (() => {
       toRow: (o, h, i) => ({
         id: o.id, household_id: h, title: o.title, weight: o.weight, recurrence: o.repeat,
         task_time: o.time || null, days: o.days && o.days.length ? o.days : null, due_date: o.date || null,
+        skip_dates: o.skips && o.skips.length ? o.skips : null,
         assignee: o.assignee || null, pos: i,
       }),
       fromRow: (r) => ({
         id: r.id, title: r.title, weight: r.weight, repeat: r.recurrence,
         time: r.task_time || '', days: r.days || [], date: r.due_date || '', assignee: r.assignee || null,
+        skips: r.skip_dates || [],
         created: r.created_at ? Date.parse(r.created_at) : 0,   // do oznaczania zaległości w planie
       }),
     },
@@ -115,7 +117,15 @@ const Cloud = (() => {
       const up = [];
       for (const [id, { o, i }] of cur) if (snap[id] !== canon(c, o)) up.push(c.toRow(o, hid, i));
       const del = Object.keys(snap).filter((id) => !cur.has(id));
-      if (up.length) { const { error } = await sb.from(name).upsert(up); if (error) throw error; }
+      if (up.length) {
+        let { error } = await sb.from(name).upsert(up);
+        // baza bez kolumny skip_dates (jeszcze nie zaktualizowana): zapisz bez pominiętych dni zamiast psuć synchronizację
+        if (error && /skip_dates/.test(error.message || '')) {
+          up.forEach((r) => { delete r.skip_dates; });
+          ({ error } = await sb.from(name).upsert(up));
+        }
+        if (error) throw error;
+      }
       if (del.length) { const { error } = await sb.from(name).delete().in('id', del); if (error) throw error; }
       const next = {};
       for (const [id, { o }] of cur) next[id] = canon(c, o);
