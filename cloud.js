@@ -30,12 +30,14 @@ const Cloud = (() => {
         id: o.id, household_id: h, title: o.title, weight: o.weight, recurrence: o.repeat,
         task_time: o.time || null, days: o.days && o.days.length ? o.days : null, due_date: o.date || null,
         skip_dates: o.skips && o.skips.length ? o.skips : null,
+        status: o.status === 'pending' ? 'pending' : 'active', proposed_by: o.proposedBy || null,
         assignee: o.assignee || null, pos: i,
       }),
       fromRow: (r) => ({
         id: r.id, title: r.title, weight: r.weight, repeat: r.recurrence,
         time: r.task_time || '', days: r.days || [], date: r.due_date || '', assignee: r.assignee || null,
         skips: r.skip_dates || [],
+        status: r.status === 'pending' ? 'pending' : 'active', proposedBy: r.proposed_by || '',
         created: r.created_at ? Date.parse(r.created_at) : 0,   // do oznaczania zaległości w planie
       }),
     },
@@ -111,24 +113,46 @@ const Cloud = (() => {
   async function push() {
     const hid = meta.householdId;
     for (const [name, c] of Object.entries(COLS)) {
-      if (api.role === 'child' && name !== 'log') continue;   // dziecko nie zmienia domowników ani zadań
+      const isChild = api.role === 'child';
+      if (isChild && name === 'members') continue;   // dziecko nie zmienia domowników
       const snap = snapshot[name];
-      const cur = new Map(state[name].map((o, i) => [o.id, { o, i }]));
+      const all = new Map(state[name].map((o, i) => [o.id, { o, i }]));
+      // dziecko wysyła tylko własne propozycje zadań (czekające na potwierdzenie) oraz własne odhaczenia
+      const ownPending = (o) => o.status === 'pending' && o.proposedBy && o.proposedBy === api.me;
+      const snapObj = (id) => { try { return JSON.parse(snap[id]); } catch (e) { return null; } };
+      const forMe = (p) => p && p.status === 'pending' && p.assignee && p.assignee === api.me;   // zadanie czekające na moje potwierdzenie
+      let cur = all;
+      let accepts = [];
+      if (isChild && name === 'tasks') {
+        cur = new Map([...all].filter(([, v]) => ownPending(v.o)));
+        // potwierdzone przeze mnie zadania skierowane do mnie (wysyłamy tylko zmianę statusu)
+        accepts = [...all].filter(([id, v]) => v.o.assignee === api.me && v.o.status === 'active' && forMe(snapObj(id))).map(([id]) => id);
+      }
       const up = [];
       for (const [id, { o, i }] of cur) if (snap[id] !== canon(c, o)) up.push(c.toRow(o, hid, i));
-      const del = Object.keys(snap).filter((id) => !cur.has(id));
+      let del = Object.keys(snap).filter((id) => !all.has(id));
+      if (isChild && name === 'tasks') {
+        // wolno usuwać tylko własne propozycje i odrzucone zadania skierowane do mnie (po stanie z ostatniej synchronizacji)
+        del = del.filter((id) => { const p = snapObj(id); return p && p.status === 'pending' && (p.proposedBy === api.me || p.assignee === api.me); });
+      }
       if (up.length) {
         let { error } = await sb.from(name).upsert(up);
-        // baza bez kolumny skip_dates (jeszcze nie zaktualizowana): zapisz bez pominiętych dni zamiast psuć synchronizację
-        if (error && /skip_dates/.test(error.message || '')) {
-          up.forEach((r) => { delete r.skip_dates; });
+        // baza bez nowych kolumn (jeszcze nie zaktualizowana): zapisz bez nich zamiast psuć synchronizację
+        if (error && /column/i.test(error.message || '') && /(skip_dates|proposed_by|status)/.test(error.message || '')) {
+          up.forEach((r) => { delete r.skip_dates; delete r.proposed_by; delete r.status; });
           ({ error } = await sb.from(name).upsert(up));
         }
         if (error) throw error;
       }
+      for (const id of accepts) {
+        const { error } = await sb.from('tasks').update({ status: 'active' }).eq('id', id);
+        if (error) throw error;
+      }
       if (del.length) { const { error } = await sb.from(name).delete().in('id', del); if (error) throw error; }
-      const next = {};
+      const next = (isChild && name === 'tasks') ? { ...snap } : {};
+      for (const id of del) delete next[id];
       for (const [id, { o }] of cur) next[id] = canon(c, o);
+      for (const id of accepts) next[id] = canon(c, all.get(id).o);
       snapshot[name] = next;
     }
     write(SNAP_KEY, snapshot);

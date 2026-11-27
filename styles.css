@@ -204,6 +204,15 @@ input[type="time"], input[type="date"] { width: 100%; padding: 10px 12px; border
 .slide-from-right { animation: slide-from-right .2s ease-out; }
 .slide-from-left { animation: slide-from-left .2s ease-out; }
 main { touch-action: pan-y pinch-zoom; }   /* pionowe przewijanie zostaje, poziomy ruch obsługujemy sami */
+/* Zadania czekające na potwierdzenie: blade, przerywana ramka */
+.card.pending { opacity: .7; border-style: dashed; background: transparent; }
+.card.pending .title { font-style: italic; }
+.pbtns { display: flex; flex-direction: column; gap: 6px; flex: none; }
+.pending-block { margin-top: 4px; }
+.badge.wait { background: var(--soft); color: var(--muted); border: 1px dashed var(--muted); }
+.prow.st-pending { opacity: .65; border-style: dashed; background: transparent; }
+.prow.st-pending .ptitle { font-style: italic; }
+.hint { background: var(--soft); border-radius: 10px; padding: 8px 10px; margin: 8px 0 0; font-size: .85rem; }
 .actions.stack { flex-direction: column; align-items: stretch; }
 .actions.stack .btn { width: 100%; text-align: center; }
 .icon-btn.add { background: var(--soft); color: var(--primary); font-size: 1.2rem; }
