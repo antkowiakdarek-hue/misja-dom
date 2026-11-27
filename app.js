@@ -197,6 +197,43 @@ function weekFloating(weekStart) {
     .map((i) => ({ ...i, status: i.done ? 'done' : 'upcoming' }));
 }
 
+/* Zadania dnia do oglądania w "Dziś" (dni minione i jutro). Dla dni minionych dokładamy też wpisy
+   zadań, które nie wypadają cyklicznie tego dnia (np. "raz w tygodniu") i zadań już usuniętych. */
+function itemsFor(d) {
+  const ds = startOfDay(d), today = startOfDay(new Date());
+  const base = itemsOn(ds);
+  if (ds > today) return base;
+  const seen = new Set(base.map((i) => i.t.id));
+  const a = ds.getTime(), b = addDays(ds, 1).getTime();
+  const extra = [];
+  for (const l of state.log) {
+    if (l.ts < a || l.ts >= b) continue;
+    let t = state.tasks.find((x) => x.id === l.taskId);
+    if (t) {
+      if (seen.has(t.id) || !visibleToMe(t)) continue;
+    } else {
+      t = { id: l.taskId, title: l.title, weight: l.points, repeat: 'none', time: '', days: [], date: '', assignee: l.memberId, deleted: true };
+      if (seen.has(t.id)) continue;
+      if (!isParent() && t.assignee !== meId()) continue;
+      if (isParent() && filterMember && t.assignee !== filterMember) continue;
+    }
+    seen.add(t.id);
+    extra.push({ t, done: l, status: 'done' });
+  }
+  const key = (i) => (isTimed(i.t) ? toMin(i.t.time) : 24 * 60 + 1);
+  return base.concat(extra).sort((x, y) => key(x) - key(y));
+}
+
+/* Automatyczne czyszczenie: historia starsza niż 14 dni oraz jednorazowe zadania z datą sprzed 14 dni. */
+function pruneOld() {
+  const base = addDays(startOfDay(new Date()), -14);
+  const cutoff = base.getTime(), cutKey = dayKey(base);
+  const before = state.log.length + state.tasks.length;
+  state.log = state.log.filter((l) => l.ts >= cutoff);
+  state.tasks = state.tasks.filter((t) => !(t.repeat === 'none' && t.date && t.date < cutKey));
+  return state.log.length + state.tasks.length !== before;
+}
+
 /* ---------- okna ---------- */
 const dlg = document.getElementById('dlg');
 function openDialog(title, ...body) {
@@ -422,7 +459,7 @@ function cloudSection() {
         () => { Push.disable().finally(() => Cloud.leave()); }, 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
 }
 
-const APP_VERSION = '2026-11-27-a';
+const APP_VERSION = '2026-11-27-b';
 
 /* Wymusza pobranie najnowszych plików i nowego service workera (przydatne na iPhonie). */
 async function refreshApp() {
@@ -519,39 +556,73 @@ function askDeleteTask(task) {
     () => { state.tasks = state.tasks.filter((x) => x.id !== task.id); save(); render(); });
 }
 
+/* Dzień oglądany w zakładce "Dziś": 0 = dziś, -1 = wczoraj ... -14, +1 = jutro. */
+const HISTORY_DAYS = 14;
+let dayOffset = 0;
+
+function dayLabel(offset) {
+  if (offset === 0) return 'Dziś';
+  if (offset === -1) return 'Wczoraj';
+  if (offset === 1) return 'Jutro';
+  const d = addDays(startOfDay(new Date()), offset);
+  return `${DAY_SHORT[weekdayIdx(d)]} ${d.getDate()} ${MONTHS_SHORT[d.getMonth()]}`;
+}
+function dayNav() {
+  const go = (n) => { dayOffset = Math.max(-HISTORY_DAYS, dayOffset + n); render(); };
+  return h('div', { class: 'plan-nav daynav' },
+    h('button', { class: 'btn ghost small', disabled: dayOffset <= -HISTORY_DAYS, onclick: () => go(-1), 'aria-label': 'Poprzedni dzień' }, '‹'),
+    h('strong', {}, dayLabel(dayOffset)),
+    h('div', { class: 'row' },
+      dayOffset !== 0 && h('button', { class: 'btn ghost small', onclick: () => { dayOffset = 0; render(); } }, 'Dziś'),
+      h('button', { class: 'btn ghost small', onclick: () => go(1), 'aria-label': 'Następny dzień' }, '›')));
+}
+
 function taskCard({ t, done, status }) {
   const parent = isParent();
   const m = done ? member(done.memberId) : member(t.assignee);
   const timed = isTimed(t);
-  const canUndo = done && (parent || done.memberId === meId());
+  const isToday = dayOffset === 0, past = dayOffset < 0;
+  const canUndo = isToday && done && (parent || done.memberId === meId());
   const badge = status === 'late' || status === 'overdue' ? h('span', { class: 'badge bad' }, 'Spóźnione')
+    : status === 'missed' ? h('span', { class: 'badge bad' }, 'Niezrobione')
     : status === 'soon' ? h('span', { class: 'badge soon' }, 'Zaraz') : null;
+  const editable = parent && !past && !t.deleted;
   return h('div', { class: `card st-${status}` + (done ? ' done' : '') },
     h('div', { class: 'time' + (timed ? '' : ' small') }, timed ? t.time : t.repeat === 'weekly' ? 'w tygodniu' : 'w ciągu dnia'),
-    h('button', { class: 'body', disabled: !parent, onclick: () => taskForm(t), 'aria-label': parent ? `Edytuj: ${t.title}` : t.title },
+    h('button', { class: 'body', disabled: !editable, onclick: () => taskForm(t), 'aria-label': editable ? `Edytuj: ${t.title}` : t.title },
       h('div', { class: 'title' }, t.title),
-      h('div', { class: 'meta' }, dots(t.weight), h('span', {}, scheduleText(t)),
+      h('div', { class: 'meta' }, dots(t.weight), t.deleted ? h('span', {}, 'zadanie usunięte') : h('span', {}, scheduleText(t)),
         done ? h('span', {}, '✓ ', m ? m.name : 'ktoś', ' · ', fmtTime(done.ts)) : (m && who(m)), badge)),
-    parent && h('button', { class: 'icon-btn', 'aria-label': `Usuń zadanie: ${t.title}`, title: 'Usuń zadanie', onclick: () => askDeleteTask(t) }, '✕'),
-    done
-      ? (canUndo && h('button', { class: 'btn ghost small', onclick: () => undo(done) }, 'Cofnij'))
-      : h('button', { class: 'btn', onclick: () => onDone(t) }, 'Zrobione'));
+    editable && h('button', { class: 'icon-btn', 'aria-label': `Usuń zadanie: ${t.title}`, title: 'Usuń zadanie', onclick: () => askDeleteTask(t) }, '✕'),
+    isToday
+      ? (done
+        ? (canUndo && h('button', { class: 'btn ghost small', onclick: () => undo(done) }, 'Cofnij'))
+        : h('button', { class: 'btn', onclick: () => onDone(t) }, 'Zrobione'))
+      : null);
 }
 
 function renderTasks() {
   const parent = isParent();
   const me = meId();
-  let items = todayItems(new Date());
+  const viewDay = addDays(startOfDay(new Date()), dayOffset);
+  const isToday = dayOffset === 0, past = dayOffset < 0;
+  let items = isToday ? todayItems(new Date()) : itemsFor(viewDay);
   if (!parent) items = items.filter((i) => !i.t.assignee || i.t.assignee === me);
   else if (filterMember) items = items.filter((i) => i.t.assignee === filterMember);
   const todo = items.filter((i) => !i.done), done = items.filter((i) => i.done);
   const total = items.length;
   const pct = total ? Math.round((done.length / total) * 100) : 0;
-  const today = new Date().toLocaleDateString('pl-PL', { weekday: 'long', day: 'numeric', month: 'long' });
+  const dateText = viewDay.toLocaleDateString('pl-PL', { weekday: 'long', day: 'numeric', month: 'long' });
   const meM = member(me);
+  const title = isToday ? (parent ? 'Dziś w domu' : meM ? `Cześć, ${meM.name}` : 'Moje zadania')
+    : past ? (dayOffset === -1 ? 'Wczoraj' : 'Historia') : (dayOffset === 1 ? 'Jutro' : dayLabel(dayOffset));
+  const emptyText = !isToday ? (past ? 'Brak zadań tego dnia.' : 'Nic nie zaplanowano na ten dzień.')
+    : (parent ? 'Brak zadań na dziś. Dodaj plan przyciskiem +.' : 'Na dziś nic do zrobienia.');
   return h('section', {},
-    h('h1', {}, parent ? 'Dziś w domu' : meM ? `Cześć, ${meM.name}` : 'Moje zadania'),
-    h('p', { class: 'sub' }, today),
+    h('h1', {}, title),
+    h('p', { class: 'sub' }, dateText),
+    dayNav(),
+    past && h('div', { class: 'note' }, `Historia z ostatnich ${HISTORY_DAYS} dni. Starsze dni usuwają się automatycznie.`),
     parent && state.members.length > 1 && h('div', { class: 'chips filter', role: 'group', 'aria-label': 'Filtr osoby' },
       h('button', { class: 'chip small', 'aria-pressed': String(!filterMember), onclick: () => { filterMember = null; render(); } }, 'Wszyscy'),
       state.members.map((m) => h('button', { class: 'chip small', 'aria-pressed': String(filterMember === m.id), onclick: () => { filterMember = m.id; render(); } }, who(m)))),
@@ -560,17 +631,17 @@ function renderTasks() {
     total > 0 && h('div', {},
       h('div', { class: 'progress', role: 'progressbar', 'aria-valuenow': pct, 'aria-valuemin': 0, 'aria-valuemax': 100 }, h('i', { style: `width:${pct}%` })),
       h('small', { class: 'sub' }, `${done.length} z ${total} zrobione`)),
-    total === 0 && h('div', { class: 'empty' }, parent ? 'Brak zadań na dziś. Dodaj plan przyciskiem +.' : 'Na dziś nic do zrobienia.'),
-    todo.length > 0 && h('h2', {}, 'Do zrobienia'),
+    total === 0 && h('div', { class: 'empty' }, emptyText),
+    todo.length > 0 && h('h2', {}, isToday ? 'Do zrobienia' : past ? 'Niezrobione' : 'Zaplanowane'),
     todo.map(taskCard),
     done.length > 0 && h('h2', {}, 'Zrobione'),
     done.map(taskCard),
-    parent && h('button', { class: 'fab', onclick: () => taskForm(null), 'aria-label': 'Dodaj zadanie' }, '+'));
+    parent && !past && h('button', { class: 'fab', onclick: () => taskForm(null, isToday ? null : { date: dayKey(viewDay) }), 'aria-label': 'Dodaj zadanie' }, '+'));
 }
 
 function renderStats() {
   const now = new Date();
-  const from = (range === 'week' ? startOfWeek(now) : startOfMonth(now)).getTime();
+  const from = (range === 'week' ? startOfWeek(now) : addDays(startOfDay(now), -HISTORY_DAYS)).getTime();
   const entries = state.log.filter((l) => l.ts >= from && member(l.memberId));
   const pts = new Map(state.members.map((m) => [m.id, 0]));
   entries.forEach((l) => pts.set(l.memberId, pts.get(l.memberId) + l.points));
@@ -595,7 +666,7 @@ function renderStats() {
     h('p', { class: 'sub' }, 'Punkty zależą od wysiłku zadania, nie od liczby odhaczeń.'),
     h('div', { class: 'seg', role: 'group' },
       h('button', { 'aria-pressed': String(range === 'week'), onclick: () => { range = 'week'; render(); } }, 'Ten tydzień'),
-      h('button', { 'aria-pressed': String(range === 'month'), onclick: () => { range = 'month'; render(); } }, 'Ten miesiąc')),
+      h('button', { 'aria-pressed': String(range === 'month'), onclick: () => { range = 'month'; render(); } }, 'Ostatnie 2 tygodnie')),
     rows.map(({ m, p, pct }) => h('div', { class: 'bar-row' },
       h('div', { class: 'bar-head' }, who(m), h('span', {}, `${p} pkt · ${pct}%`)),
       h('div', { class: 'bar' }, h('i', { style: `--c:${m.color};width:${(p / max) * 100}%` })))),
@@ -751,10 +822,14 @@ Cloud.onUpdate = (statusOnly) => {
   if (a && (a.tagName === 'INPUT' || a.tagName === 'SELECT') && !dlg.open) return;   // nie psuj pisania
   render();
 };
+if (pruneOld()) save();
 render();
 Cloud.init();
 setTimeout(() => { Push.resave().catch(() => {}); }, 5000);   // odśwież zapis subskrypcji push po synchronizacji
-setInterval(() => { if ((tab === 'tasks' || tab === 'plan') && state.members.length && idle()) render(); }, 60000);   // przeliczanie „Zaraz” i „Spóźnione”
+setInterval(() => {
+  if (pruneOld()) save();
+  if ((tab === 'tasks' || tab === 'plan') && state.members.length && idle()) render();
+}, 60000);   // przeliczanie „Zaraz” i „Spóźnione”
 document.addEventListener('visibilitychange', () => { if (idle() && tab === 'tasks') render(); });
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});

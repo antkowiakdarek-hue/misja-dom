@@ -8,7 +8,7 @@ const Cloud = (() => {
   const SDK = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js';
   const META_KEY = 'po-rowno-cloud-v1';
   const SNAP_KEY = 'po-rowno-snap-v1';
-  const LOG_DAYS = 90;
+  const LOG_DAYS = 14;   // tyle dni historii trzymamy (starsze kasuje się automatycznie)
   const configured = Boolean(CFG.url && CFG.anonKey);
 
   const read = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (e) { return d; } };
@@ -125,7 +125,8 @@ const Cloud = (() => {
   }
   async function pull() {
     const hid = meta.householdId;
-    const since = Date.now() - LOG_DAYS * 864e5;
+    const d0 = new Date(); d0.setHours(0, 0, 0, 0);
+    const since = d0.getTime() - LOG_DAYS * 864e5;
     const [m, t, l] = await Promise.all([
       sb.from('members').select('*').eq('household_id', hid).order('pos').order('id'),
       sb.from('tasks').select('*').eq('household_id', hid).order('pos').order('id'),
