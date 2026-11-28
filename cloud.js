@@ -16,7 +16,7 @@ const Cloud = (() => {
 
   let meta = read(META_KEY, {});            // { householdId, code }
   let snapshot = read(SNAP_KEY, null);      // { members:{id:json}, tasks:{...}, log:{...} }
-  let sb = null, channel = null, timer = null, accessChecked = false;
+  let sb = null, channel = null, channel2 = null, timer = null, accessChecked = false;
   let queue = Promise.resolve();
 
   /* Mapowanie obiektów aplikacji <-> wiersze bazy. */
@@ -47,12 +47,25 @@ const Cloud = (() => {
       toRow: (o, h) => ({ id: o.id, household_id: h, task_id: o.taskId, title: o.title, member_id: o.memberId, ts: o.ts, points: o.points }),
       fromRow: (r) => ({ id: r.id, taskId: r.task_id, title: r.title, memberId: r.member_id, ts: Number(r.ts), points: r.points }),
     },
+    // plan lekcji dziecka (id = id dziecka); tabela opcjonalna: bez niej reszta aplikacji działa jak dotąd
+    school: {
+      table: 'school_plans', optional: true,
+      toRow: (o, h) => ({ id: o.id, household_id: h, days: o.days || [], travel: o.travel == null ? 20 : o.travel, free: o.free || [] }),
+      fromRow: (r) => ({
+        id: r.id,
+        days: (r.days || []).map((d) => ({ on: Boolean(d.on), start: d.start || '', end: d.end || '' })),
+        travel: r.travel == null ? 20 : r.travel,
+        free: (r.free || []).map((f) => ({ from: f.from || '', to: f.to || '' })),
+      }),
+    },
   };
-  const emptyState = () => ({ members: [], tasks: [], log: [] });
+  const emptyState = () => ({ members: [], tasks: [], log: [], school: [] });
   const canon = (c, o) => JSON.stringify(c.fromRow(c.toRow(o, '', 0)));
+  let schoolDown = false;   // true, gdy w bazie nie ma jeszcze tabeli planów lekcji
+  const missingTable = (e) => Boolean(e) && /school_plans/.test(e.message || '') && /(schema cache|does not exist|relation|Could not find)/i.test(e.message || '');
   function snapOf(st) {
     const s = {};
-    for (const [n, c] of Object.entries(COLS)) { s[n] = {}; for (const o of st[n]) s[n][o.id] = canon(c, o); }
+    for (const [n, c] of Object.entries(COLS)) { s[n] = {}; for (const o of (st[n] || [])) s[n][o.id] = canon(c, o); }
     return s;
   }
   const snapStr = (s) => JSON.stringify(Object.keys(COLS).map((n) => Object.keys(s[n]).sort().map((id) => [id, s[n][id]])));
@@ -116,9 +129,11 @@ const Cloud = (() => {
     const hid = meta.householdId;
     for (const [name, c] of Object.entries(COLS)) {
       const isChild = api.role === 'child';
+      const table = c.table || name;
       if (isChild && name === 'members') continue;   // dziecko nie zmienia domowników
-      const snap = snapshot[name];
-      const all = new Map(state[name].map((o, i) => [o.id, { o, i }]));
+      if (name === 'school' && (schoolDown || !isChild)) continue;   // plan lekcji wysyła tylko dziecko (rodzic ma wgląd)
+      const snap = snapshot[name] || {};
+      const all = new Map((state[name] || []).map((o, i) => [o.id, { o, i }]));
       // dziecko wysyła tylko własne propozycje zadań (czekające na potwierdzenie) oraz własne odhaczenia
       // własne propozycje oraz własne zadania dla siebie (działają jak przypomnienia, bez potwierdzenia)
       const ownPending = (o) => Boolean(api.me) && o.proposedBy === api.me && (o.status === 'pending' || o.assignee === api.me);
@@ -126,6 +141,7 @@ const Cloud = (() => {
       const forMe = (p) => p && p.status === 'pending' && p.assignee && p.assignee === api.me;   // zadanie czekające na moje potwierdzenie
       let cur = all;
       let accepts = [];
+      if (isChild && name === 'school') cur = new Map([...all].filter(([id]) => id === api.me));   // tylko własny plan
       if (isChild && name === 'tasks') {
         cur = new Map([...all].filter(([, v]) => ownPending(v.o)));
         // potwierdzone przeze mnie zadania skierowane do mnie (wysyłamy tylko zmianę statusu)
@@ -134,6 +150,7 @@ const Cloud = (() => {
       const up = [];
       for (const [id, { o, i }] of cur) if (snap[id] !== canon(c, o)) up.push(c.toRow(o, hid, i));
       let del = Object.keys(snap).filter((id) => !all.has(id));
+      if (name === 'school') del = [];   // plany lekcji nie są usuwane przez synchronizację
       if (isChild && name === 'tasks') {
         // wolno usuwać tylko własne propozycje i odrzucone zadania skierowane do mnie (po stanie z ostatniej synchronizacji)
         del = del.filter((id) => {
@@ -144,19 +161,20 @@ const Cloud = (() => {
         });
       }
       if (up.length) {
-        let { error } = await sb.from(name).upsert(up);
+        let { error } = await sb.from(table).upsert(up);
         // baza bez nowych kolumn (jeszcze nie zaktualizowana): zapisz bez nich zamiast psuć synchronizację
         if (error && /column/i.test(error.message || '') && /(skip_dates|proposed_by|status|transfer_of|transfer_day)/.test(error.message || '')) {
           up.forEach((r) => { delete r.skip_dates; delete r.proposed_by; delete r.status; delete r.transfer_of; delete r.transfer_day; });
-          ({ error } = await sb.from(name).upsert(up));
+          ({ error } = await sb.from(table).upsert(up));
         }
+        if (error && c.optional && missingTable(error)) { schoolDown = true; continue; }   // brak tabeli planów lekcji w bazie
         if (error) throw error;
       }
       for (const id of accepts) {
         const { error } = await sb.from('tasks').update({ status: 'active' }).eq('id', id);
         if (error) throw error;
       }
-      if (del.length) { const { error } = await sb.from(name).delete().in('id', del); if (error) throw error; }
+      if (del.length) { const { error } = await sb.from(table).delete().in('id', del); if (error) throw error; }
       const next = (isChild && name === 'tasks') ? { ...snap } : {};
       for (const id of del) delete next[id];
       for (const [id, { o }] of cur) next[id] = canon(c, o);
@@ -175,21 +193,29 @@ const Cloud = (() => {
       sb.from('log').select('*').eq('household_id', hid).gte('ts', since).order('ts', { ascending: false }).limit(2000),
     ]);
     for (const r of [m, t, l]) if (r.error) throw r.error;
+    // plany lekcji: gdy tabeli jeszcze nie ma, zachowaj plany lokalne i nie przerywaj synchronizacji
+    let school = (state.school || []).slice();
+    const sc = await sb.from('school_plans').select('*').eq('household_id', hid);
+    if (sc.error) { if (missingTable(sc.error)) schoolDown = true; else throw sc.error; }
+    else school = sc.data.map(COLS.school.fromRow);
     return {
       members: m.data.map(COLS.members.fromRow),
       tasks: t.data.map(COLS.tasks.fromRow),
       log: l.data.map(COLS.log.fromRow).sort((a, b) => a.ts - b.ts),
+      school,
     };
   }
 
   async function doSync() {
     if (!meta.householdId) return;
     setStatus(navigator.onLine ? 'syncing' : 'offline');
+    schoolDown = false;   // sprawdź ponownie, czy tabela planów lekcji już istnieje
     try {
       await ensureClient();
       await checkAccess();
       if (!channel) subscribe();
       if (!snapshot) snapshot = snapOf(emptyState());
+      for (const n of Object.keys(COLS)) snapshot[n] = snapshot[n] || {};   // starsze zapisane migawki bez planów lekcji
       await push();
       const before = snapStr(snapOf(state));
       const remote = await pull();
@@ -217,13 +243,23 @@ const Cloud = (() => {
   function subscribe() {
     unsubscribe();
     const ch = sb.channel('po-rowno');
-    for (const table of Object.keys(COLS)) ch.on('postgres_changes', { event: '*', schema: 'public', table }, () => scheduleSync(250));
+    for (const [key, c] of Object.entries(COLS)) {
+      if (c.optional) continue;   // opcjonalne tabele w osobnym kanale: ich brak nie psuje reszty
+      ch.on('postgres_changes', { event: '*', schema: 'public', table: c.table || key }, () => scheduleSync(250));
+    }
     ch.subscribe();
     channel = ch;
+    try {
+      const sch = sb.channel('po-rowno-school');
+      sch.on('postgres_changes', { event: '*', schema: 'public', table: 'school_plans' }, () => scheduleSync(250));
+      sch.subscribe();
+      channel2 = sch;
+    } catch (e) { channel2 = null; }
   }
   function unsubscribe() {
     if (channel && sb) sb.removeChannel(channel);
-    channel = null;
+    if (channel2 && sb) sb.removeChannel(channel2);
+    channel = null; channel2 = null;
   }
 
   /* ---------- API dla UI ---------- */

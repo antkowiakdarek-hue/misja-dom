@@ -213,6 +213,19 @@ main { touch-action: pan-y pinch-zoom; }   /* pionowe przewijanie zostaje, pozio
 .prow.st-pending { opacity: .65; border-style: dashed; background: transparent; }
 .prow.st-pending .ptitle { font-style: italic; }
 .hint { background: var(--soft); border-radius: 10px; padding: 8px 10px; margin: 8px 0 0; font-size: .85rem; }
+/* Plan lekcji */
+.school-bar { background: var(--soft); border-radius: var(--radius); padding: 10px 14px; margin: 4px 0 10px; font-size: .92rem; }
+.school-line + .school-line { margin-top: 4px; }
+.school-note { color: var(--muted); font-size: .82rem; margin: 0 4px 6px; }
+.hint.warn { background: transparent; border: 1px solid var(--danger); color: var(--danger); }
+.school-rows { display: grid; gap: 6px; margin: 6px 0 10px; }
+.school-free input { flex: 1 1 130px; min-width: 0; }
+.school-row { display: grid; grid-template-columns: 64px 1fr auto 1fr; align-items: center; gap: 6px; }
+.school-day { display: flex; align-items: center; gap: 6px; margin: 0; font-weight: 600; }
+.school-day input { width: 20px; height: 20px; }
+.school-row input[type="time"] { min-height: 40px; padding: 6px 8px; }
+input[type="number"] { width: 100%; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); min-height: 44px; }
+dialog { max-height: 90vh; overflow-y: auto; }
 .actions.stack { flex-direction: column; align-items: stretch; }
 .actions.stack .btn { width: 100%; text-align: center; }
 .icon-btn.add { background: var(--soft); color: var(--primary); font-size: 1.2rem; }

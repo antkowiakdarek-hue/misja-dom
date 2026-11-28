@@ -40,10 +40,11 @@ function load() {
         t.status = t.status === 'pending' ? 'pending' : 'active'; t.proposedBy = t.proposedBy || '';
         t.transferOf = t.transferOf || ''; t.transferDay = t.transferDay || '';
       });
+      s.school = Array.isArray(s.school) ? s.school : [];
       return s;
     }
   } catch (e) { /* brak danych lub brak dostępu do localStorage */ }
-  return { members: [], tasks: [], log: [] };
+  return { members: [], tasks: [], log: [], school: [] };
 }
 function saveLocal() {
   try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* tryb prywatny */ }
@@ -138,6 +139,177 @@ function approverOf(t) {
 /* Kto może dodawać zadania: rodzic zawsze, dziecko (jako propozycje) tylko w podłączonym domu z wybranym profilem. */
 function canAdd() { return isParent() || (Cloud.connected && Boolean(meId())); }
 
+/* ---------- plan lekcji ---------- */
+/* Plan dziecka: godziny w szkole dla każdego dnia tygodnia (pon..nd), droga do domu w minutach i dni wolne (zakresy dat).
+   Wpisuje go dziecko, rodzic ma wgląd. Służy do ostrzegania, gdy zadanie wypada w czasie lekcji. */
+function minToHHMM(m) { const x = Math.max(0, Math.min(m, 23 * 60 + 59)); return `${pad(Math.floor(x / 60))}:${pad(x % 60)}`; }
+function newSchoolDays() { return ALL_DAYS.map((i) => ({ on: i < 5, start: '08:00', end: '14:30' })); }
+function schoolPlan(memberId) { return (state.school || []).find((p) => p.id === memberId) || null; }
+/* Plan na dzień tygodnia (bez dni wolnych): kiedy dziecko wychodzi, kiedy kończy i kiedy jest w domu. */
+function schoolDay(memberId, wd) {
+  const p = schoolPlan(memberId);
+  const d = p && (p.days || [])[wd];
+  if (!d || !d.on || !d.start || !d.end) return null;
+  const homeMin = toMin(d.end) + (p.travel || 0);
+  return { start: d.start, end: d.end, startMin: toMin(d.start), homeMin, home: minToHHMM(homeMin) };
+}
+/* Plan na konkretną datę (z uwzględnieniem dni wolnych od szkoły). */
+function schoolOn(memberId, date) {
+  const p = schoolPlan(memberId);
+  if (!p) return null;
+  const dk = dayKey(date);
+  if ((p.free || []).some((f) => f.from && f.to && dk >= f.from && dk <= f.to)) return null;
+  return schoolDay(memberId, weekdayIdx(date));
+}
+/* Czy w tym czasie dziecko jest w szkole albo wraca do domu? */
+function inSchool(s, time) {
+  if (!s || !time) return false;
+  const m = toMin(time);
+  return m >= s.startMin && m <= s.homeMin;
+}
+/* Ostrzeżenie o zadaniu w czasie lekcji (przed wysłaniem). Zwraca tekst albo ''. */
+function schoolConflictText(memberId, repeat, daysSet, dateStr, time) {
+  const m = member(memberId);
+  if (!m || m.role !== 'child' || !time || !schoolPlan(memberId)) return '';
+  let hits = [];
+  if (repeat === 'none') {
+    if (!dateStr) return '';
+    const s = schoolOn(memberId, new Date(dateStr + 'T00:00'));
+    if (inSchool(s, time)) hits = [{ s }];
+  } else if (repeat === 'daily' || repeat === 'days') {
+    const wds = repeat === 'daily' ? ALL_DAYS : [...daysSet].sort();
+    hits = wds.map((wd) => ({ wd, s: schoolDay(memberId, wd) })).filter((x) => inSchool(x.s, time));
+  }
+  if (!hits.length) return '';
+  const s = hits[0].s;
+  const dni = hits.length > 1 || hits[0].wd !== undefined ? ` (w dniach: ${hits.map((x) => DAY_SHORT[x.wd]).join(' ')})` : '';
+  return `${m.name} jest wtedy w szkole${dni}: lekcje ${s.start}–${s.end}, w domu ok. ${s.home}. Zmień godzinę albo wyślij mimo to.`;
+}
+function canEditSchool(memberId) {
+  return Cloud.connected ? (!isParent() && meId() === memberId) : true;   // w podłączonym domu plan wpisuje dziecko, rodzic ma wgląd
+}
+/* Dzieci, których plan pokazujemy (dziecko: siebie, rodzic: wszystkie albo wybrane). */
+function schoolKids() {
+  let kids = state.members.filter((m) => m.role === 'child');
+  if (!isParent()) kids = kids.filter((m) => m.id === meId());
+  else if (filterMember) kids = kids.filter((m) => m.id === filterMember);
+  return kids;
+}
+function schoolSummary(memberId) {
+  const p = schoolPlan(memberId);
+  if (!p) return 'nie wpisano planu';
+  const on = (p.days || []).map((d, i) => ({ d, i })).filter((x) => x.d.on);
+  if (!on.length) return 'bez lekcji';
+  const same = on.every((x) => x.d.start === on[0].d.start && x.d.end === on[0].d.end);
+  const days = on.map((x) => DAY_SHORT[x.i]).join(' ');
+  return `${days}${same ? ` ${on[0].d.start}–${on[0].d.end}` : ' (różne godziny)'} · droga ${p.travel || 0} min`;
+}
+/* Pasek z planem nad listą zadań w "Dziś" (dla oglądanego dnia). */
+function schoolBanner(viewDay) {
+  const lines = [];
+  for (const m of schoolKids()) {
+    if (!schoolPlan(m.id)) continue;
+    const s = schoolOn(m.id, viewDay);
+    lines.push(h('div', { class: 'school-line' }, '🎒 ', h('strong', {}, m.name), s ? `: szkoła ${s.start}–${s.end}, w domu ok. ${s.home}` : ': bez lekcji'));
+  }
+  if (lines.length) return h('div', { class: 'school-bar' }, lines);
+  const me = meId();
+  if (!isParent() && Cloud.connected && me && !schoolPlan(me)) {
+    return h('div', { class: 'school-bar' }, h('span', {}, '🎒 Dodaj swój plan lekcji, żeby aplikacja ostrzegała, gdy zadanie wypada w szkole. '),
+      h('button', { class: 'btn ghost small', onclick: () => { tab = 'home'; render(); } }, 'Dodaj'));
+  }
+  return null;
+}
+/* Mała notatka przy dniu w widoku Plan. */
+function schoolNote(d) {
+  const parts = [];
+  for (const m of schoolKids()) {
+    const s = schoolOn(m.id, d);
+    if (s) parts.push(`${m.name} ${s.start}–${s.end}`);
+  }
+  return parts.length ? h('div', { class: 'school-note' }, '🎒 ' + parts.join(' · ')) : null;
+}
+function schoolView(memberId) {
+  const m = member(memberId), p = schoolPlan(memberId);
+  if (!m || !p) return;
+  const rows = ALL_DAYS.map((i) => {
+    const s = schoolDay(memberId, i);
+    return h('li', {}, h('strong', {}, DAY_SHORT[i]), s ? ` ${s.start}–${s.end}, w domu ok. ${s.home}` : ' bez lekcji');
+  });
+  const free = (p.free || []).map((f) => `${f.from.slice(8, 10)}.${f.from.slice(5, 7)}–${f.to.slice(8, 10)}.${f.to.slice(5, 7)}`).join(', ');
+  openDialog(`Plan lekcji: ${m.name}`, h('ul', { class: 'log' }, rows),
+    h('p', { class: 'sub' }, `Droga do domu: ${p.travel || 0} min.`, free ? ` Dni wolne: ${free}.` : ''),
+    h('div', { class: 'actions' }, cancelBtn('Zamknij')));
+}
+function schoolEditor(memberId) {
+  const m = member(memberId);
+  if (!m) return;
+  const cur = schoolPlan(memberId);
+  const draft = cur ? JSON.parse(JSON.stringify(cur)) : { id: memberId, days: newSchoolDays(), travel: 20, free: [] };
+  while (draft.days.length < 7) draft.days.push({ on: false, start: '08:00', end: '14:30' });
+  draft.free = draft.free || [];
+  const travel = h('input', { type: 'number', id: 'sc-travel', min: 0, max: 180, inputmode: 'numeric', value: draft.travel });
+  const rows = h('div', { class: 'school-rows' });
+  const freeBox = h('div', { class: 'chips' });
+  const fFrom = h('input', { type: 'date', id: 'sc-from', 'aria-label': 'Wolne od' });
+  const fTo = h('input', { type: 'date', id: 'sc-to', 'aria-label': 'Wolne do' });
+  const err = h('p', { class: 'sub hint warn', hidden: true });
+  function draw() {
+    rows.replaceChildren(...ALL_DAYS.map((i) => {
+      const d = draft.days[i];
+      const on = h('input', { type: 'checkbox', checked: d.on, 'aria-label': `Lekcje w dniu ${DAY_SHORT[i]}`, onchange: (e) => { d.on = e.target.checked; draw(); } });
+      const st = h('input', { type: 'time', value: d.start, disabled: !d.on, 'aria-label': `Początek ${DAY_SHORT[i]}`, oninput: (e) => { d.start = e.target.value; } });
+      const en = h('input', { type: 'time', value: d.end, disabled: !d.on, 'aria-label': `Koniec ${DAY_SHORT[i]}`, oninput: (e) => { d.end = e.target.value; } });
+      return h('div', { class: 'school-row' }, h('label', { class: 'school-day' }, on, ' ', DAY_SHORT[i]), st, h('span', {}, '–'), en);
+    }));
+    freeBox.replaceChildren(...draft.free.map((f, idx) => h('button', { type: 'button', class: 'chip small', onclick: () => { draft.free.splice(idx, 1); draw(); } },
+      `${f.from.slice(8, 10)}.${f.from.slice(5, 7)} – ${f.to.slice(8, 10)}.${f.to.slice(5, 7)} ✕`)));
+  }
+  draw();
+  const form = h('form', {
+    onsubmit: (e) => {
+      e.preventDefault();
+      for (let i = 0; i < 7; i++) {
+        const d = draft.days[i];
+        if (d.on && (!d.start || !d.end || d.start >= d.end)) {
+          err.textContent = `${DAY_SHORT[i]}: godzina końca musi być późniejsza niż początku.`; err.hidden = false; return;
+        }
+      }
+      draft.travel = Math.max(0, Math.min(180, parseInt(travel.value, 10) || 0));
+      const idx = state.school.findIndex((p) => p.id === memberId);
+      if (idx >= 0) state.school[idx] = draft; else state.school.push(draft);
+      save(); closeDialog(); render();
+    },
+  },
+    h('p', { class: 'sub' }, 'Zaznacz dni z lekcjami i wpisz, od której do której jesteś w szkole.'),
+    rows,
+    h('button', { type: 'button', class: 'btn ghost small', onclick: () => { for (let i = 1; i < 5; i++) draft.days[i] = { ...draft.days[0] }; draw(); } }, 'Kopiuj poniedziałek na Wt–Pt'),
+    h('label', { for: 'sc-travel' }, 'Ile minut zajmuje droga do domu?'), travel,
+    h('label', {}, 'Dni wolne od szkoły (ferie, święta)'), freeBox,
+    h('div', { class: 'row wrap school-free' }, fFrom, fTo,
+      h('button', { type: 'button', class: 'btn ghost small', onclick: () => {
+        if (!fFrom.value || !fTo.value || fFrom.value > fTo.value) { err.textContent = 'Wybierz poprawny zakres dat (od ≤ do).'; err.hidden = false; return; }
+        err.hidden = true; draft.free.push({ from: fFrom.value, to: fTo.value }); fFrom.value = ''; fTo.value = ''; draw();
+      } }, 'Dodaj')),
+    err,
+    h('div', { class: 'actions' }, cancelBtn(), h('button', { type: 'submit', class: 'btn' }, 'Zapisz')));
+  openDialog(`Plan lekcji: ${m.name}`, form);
+}
+function schoolSection() {
+  const kids = state.members.filter((mm) => mm.role === 'child' && (isParent() || mm.id === meId()));
+  if (!kids.length) return null;
+  const out = [h('h2', {}, 'Plan lekcji'),
+    h('p', { class: 'sub' }, isParent() && Cloud.connected ? 'Plan wpisuje dziecko, Ty masz wgląd.' : 'Godziny w szkole i droga do domu. Aplikacja ostrzeże, gdy zadanie wypada w czasie lekcji.')];
+  for (const m of kids) {
+    const p = schoolPlan(m.id);
+    out.push(h('div', { class: 'card' },
+      h('div', { class: 'body' }, h('div', { class: 'title' }, who(m)), h('div', { class: 'meta' }, schoolSummary(m.id))),
+      p && h('button', { class: 'btn ghost small', onclick: () => schoolView(m.id) }, 'Pokaż'),
+      canEditSchool(m.id) && h('button', { class: 'btn ghost small', onclick: () => schoolEditor(m.id) }, p ? 'Edytuj' : 'Dodaj')));
+  }
+  return out;
+}
+
 /* ---------- przekazywanie zadań ---------- */
 /* Przekazać można zadanie z godziną, które się ma, jeśli do terminu zostało co najmniej 30 minut.
    Dotyczy jednego dnia. Prośba to oczekujące zadanie jednorazowe dla adresata; do czasu przejęcia zadanie zostaje u nadawcy. */
@@ -177,7 +349,20 @@ function transferDialog(t, day) {
   const others = state.members.filter((m) => m.id !== meId());
   if (!others.length) return notice('Brak adresata', 'W domu nie ma nikogo innego, komu można przekazać zadanie.');
   const cutoff = transferCutoff(dk, t.time);
-  const chips = others.map((m) => h('button', { type: 'button', class: 'chip', onclick: () => { closeDialog(); sendTransfer(t, dk, m.id); } }, who(m), ' · ', ROLES[m.role]));
+  const chips = others.map((m) => h('button', { type: 'button', class: 'chip', onclick: () => {
+    // ostrzeżenie, gdy adresat (dziecko) jest o tej porze w szkole
+    const s = m.role === 'child' ? schoolOn(m.id, day) : null;
+    if (inSchool(s, t.time)) {
+      openDialog('Uwaga: szkoła',
+        h('p', {}, `${m.name} jest wtedy w szkole: lekcje ${s.start}–${s.end}, w domu ok. ${s.home}. Prośba i tak może zostać wysłana, ale ${m.name} może nie zdążyć odpowiedzieć.`),
+        h('div', { class: 'actions stack' },
+          h('button', { type: 'button', class: 'btn', onclick: () => { closeDialog(); sendTransfer(t, dk, m.id); } }, 'Wyślij mimo to'),
+          h('button', { type: 'button', class: 'btn ghost', onclick: () => transferDialog(t, day) }, 'Wybierz kogoś innego'),
+          cancelBtn()));
+      return;
+    }
+    closeDialog(); sendTransfer(t, dk, m.id);
+  } }, who(m), ' · ', ROLES[m.role]));
   openDialog('Przekaż zadanie',
     h('p', {}, `„${t.title}” (${t.time}, ${dayWordFor(day)}). Wybierz, kto ma je przejąć.`),
     h('div', { class: 'chips' }, chips),
@@ -388,7 +573,7 @@ function taskForm(task, preset) {
   const skips = new Set(t.skips || []);
 
   const title = h('input', { type: 'text', id: 'f-title', value: t.title, maxlength: 60, required: true, placeholder: 'np. Opróżnić zmywarkę' });
-  const time = h('input', { type: 'time', id: 'f-time', value: t.time });
+  const time = h('input', { type: 'time', id: 'f-time', value: t.time, oninput: () => updateHint() });
   const date = h('input', { type: 'date', id: 'f-date', value: t.date, oninput: () => drawDynamic() });
   const dayBox = h('div', { class: 'chips', role: 'group', 'aria-label': 'Dni tygodnia' });
   const weightBox = h('div', { class: 'chips', role: 'group', 'aria-label': 'Ciężar zadania' });
@@ -400,6 +585,7 @@ function taskForm(task, preset) {
   const repeatSel = h('select', { id: 'f-repeat', onchange: (e) => { repeat = e.target.value; if (repeat === 'days' && days.size === 0) ALL_DAYS.forEach((d) => days.add(d)); drawDynamic(); } },
     Object.entries(REPEATS).map(([v, l]) => h('option', { value: v, selected: v === t.repeat }, l)));
   const hint = h('p', { class: 'sub hint', hidden: true });
+  const schoolWarn = h('p', { class: 'sub hint warn', hidden: true });   // ostrzeżenie: dziecko jest wtedy w szkole
   const submitBtn = h('button', { type: 'submit', class: 'btn' }, 'Zapisz');
   const assignee = h('select', { id: 'f-assignee', onchange: () => updateHint() },
     h('option', { value: '' }, 'Dla wszystkich (wspólne)'),
@@ -415,7 +601,12 @@ function taskForm(task, preset) {
     else if (pend) text = `To zadanie wymaga potwierdzenia: ${approverText(a)}. Do tego czasu będzie blade i bez przypomnień.`;
     else if (!isParent() && Cloud.connected && a === meId()) text = 'To zadanie jest tylko dla Ciebie: bez potwierdzenia, przypomni Ci o sobie.';    hint.textContent = text;
     hint.hidden = !text;
-    submitBtn.textContent = pend && (isNew || !isPending(task)) ? 'Wyślij do potwierdzenia' : 'Zapisz';
+    // ostrzeżenie o planie lekcji adresata (zadanie z godziną w czasie szkoły)
+    const warn = assignee.value ? schoolConflictText(assignee.value, repeat, days, date.value, timeWrap.hidden ? '' : time.value) : '';
+    schoolWarn.textContent = warn;
+    schoolWarn.hidden = !warn;
+    const base = pend && (isNew || !isPending(task)) ? 'Wyślij do potwierdzenia' : 'Zapisz';
+    submitBtn.textContent = base + (warn ? ' mimo to' : '');
   }
 
   function drawDynamic() {
@@ -428,6 +619,7 @@ function taskForm(task, preset) {
     dayWrap.hidden = repeat !== 'days';
     dateWrap.hidden = repeat !== 'none';
     timeWrap.hidden = repeat === 'weekly' || (repeat === 'none' && !date.value);
+    updateHint();
     const todayKey = dayKey(new Date());
     const upcoming = [...skips].filter((k) => k >= todayKey).sort();
     skipBox.replaceChildren(...upcoming.map((k) => h('button', {
@@ -470,7 +662,7 @@ function taskForm(task, preset) {
     h('label', { for: 'f-title' }, 'Co trzeba zrobić?'), title,
     h('label', { for: 'f-assignee' }, 'Dla kogo?'), assignee, hint,
     h('label', { for: 'f-repeat' }, 'Jak często?'), repeatSel,
-    dayWrap, dateWrap, timeWrap,
+    dayWrap, dateWrap, timeWrap, schoolWarn,
     h('label', {}, 'Ile wysiłku to wymaga?'), weightBox,
     skipWrap,
     h('div', { class: 'actions' },
@@ -600,7 +792,7 @@ function cloudSection() {
         () => { Push.disable().finally(() => Cloud.leave()); }, 'Tak, odłącz') }, 'Odłącz to urządzenie'))];
 }
 
-const APP_VERSION = '2026-11-27-i';
+const APP_VERSION = '2026-11-28-a';
 
 /* Wymusza pobranie najnowszych plików i nowego service workera (przydatne na iPhonie). */
 async function refreshApp() {
@@ -868,6 +1060,7 @@ function renderTasks() {
     parent && state.members.length > 1 && h('div', { class: 'chips filter', role: 'group', 'aria-label': 'Filtr osoby' },
       h('button', { class: 'chip small', 'aria-pressed': String(!filterMember), onclick: () => { filterMember = null; render(); } }, 'Wszyscy'),
       state.members.map((m) => h('button', { class: 'chip small', 'aria-pressed': String(filterMember === m.id), onclick: () => { filterMember = m.id; render(); } }, who(m)))),
+    schoolBanner(viewDay),
     !parent && !me && h('div', { class: 'note' }, 'Nie wybrano Twojego profilu. ',
       h('button', { class: 'btn small', onclick: chooseMeDialog }, 'Wybierz, kim jesteś')),
     isToday && pendingForMe().length > 0 && h('div', { class: 'pending-block' },
@@ -932,6 +1125,7 @@ function renderHome() {
     h('p', { class: 'sub' }, parent ? 'Domownicy i ustawienia.' : 'Twoje urządzenie i ustawienia.'),
     cloudSection(),
     pushSection(),
+    schoolSection(),
     parent && h('h2', {}, 'Domownicy'),
     parent && state.members.map((m) => h('div', { class: 'card' },
       h('button', { class: 'body', onclick: () => memberForm(m) }, h('div', { class: 'title' }, who(m)), h('div', { class: 'meta' }, ROLES[m.role])),
@@ -948,7 +1142,7 @@ function renderHome() {
     parent && h('h2', {}, 'Dane'),
     parent && h('button', { class: 'btn danger', onclick: () => confirmDelete(
       'Wszystkie dane (domownicy, zadania, historia) zostaną skasowane z tego urządzenia.', () => {
-        state = { members: [], tasks: [], log: [] }; save(); tab = 'tasks'; render();
+        state = { members: [], tasks: [], log: [], school: [] }; save(); tab = 'tasks'; render();
       }) }, 'Usuń wszystkie dane'),
     infoSection());
 }
@@ -981,6 +1175,7 @@ function dayBlock(d, { showHeader = true } = {}) {
       h('strong', {}, `${DAY_SHORT[weekdayIdx(d)]} ${d.getDate()} ${MONTHS_SHORT[d.getMonth()]}`),
       h('span', { class: 'sub' }, items.length ? `${done}/${items.length}` : ''),
       canAdd() && startOfDay(d) >= startOfDay(today) && h('button', { class: 'icon-btn add', 'aria-label': `Dodaj zadanie na ${dayKey(d)}`, onclick: () => taskForm(null, { date: dayKey(d) }) }, '+')),
+    schoolNote(d),
     items.length ? items.map((i) => planRow(i, d)) : h('div', { class: 'empty-day' }, 'Brak zadań'));
 }
 function planNav(title, onPrev, onNext) {
